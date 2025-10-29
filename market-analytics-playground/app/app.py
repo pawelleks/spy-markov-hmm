@@ -1,5 +1,5 @@
 # ============================================================
-# Part 1 — Setup, Sidebar, and Data Loading
+# Part 1 — Setup, Sidebar, and Data Loading (optimized)
 # ============================================================
 import warnings
 warnings.filterwarnings("ignore")
@@ -7,10 +7,29 @@ warnings.filterwarnings("ignore")
 import streamlit as st
 import pandas as pd
 import numpy as np
-import yfinance as yf
 import matplotlib.pyplot as plt
-from datetime import date
-from collections import defaultdict
+from datetime import date, timedelta
+
+# Set page early
+st.set_page_config(
+    page_title="SPY Markov & HMM Dashboard",
+    page_icon="📈",
+    layout="wide"
+)
+
+# ----------------------------
+# Performance knobs
+# ----------------------------
+MAX_PTS   = 2500          # max points drawn per chart (auto downsample)
+PRICE_COL = "Adj Close"   # preferred price column
+RAND_SEED = 42            # deterministic HMM behavior
+
+np.random.seed(RAND_SEED)
+
+import matplotlib as mpl
+mpl.rcParams["path.simplify"] = True
+mpl.rcParams["path.simplify_threshold"] = 0.6
+mpl.rcParams["agg.path.chunksize"] = 20000  # speed up long paths
 
 # ----------------------------
 # Dark theme helpers (TrendSpider-ish)
@@ -25,109 +44,136 @@ RED      = "#f44336"
 NEUTRAL  = "#9e9e9e"
 
 def styled_fig(size=(5, 3)):
-    """Create a dark-styled matplotlib figure/axes."""
     fig, ax = plt.subplots(figsize=size)
-    fig.patch.set_facecolor(DARK_BG)
+    fig.set_facecolor(DARK_BG)
     ax.set_facecolor(DARK_AX)
-    for s in ax.spines.values():
-        s.set_color(GRID)
+    for spine in ax.spines.values():
+        spine.set_color(GRID)
     ax.tick_params(colors=FG, labelsize=9)
     ax.xaxis.label.set_color(FG)
     ax.yaxis.label.set_color(FG)
     ax.title.set_color(FG)
-    ax.grid(True, color=GRID, alpha=0.6, linewidth=0.8)
+    ax.grid(True, color=GRID, linewidth=0.6, alpha=0.6)
     return fig, ax
 
-# ----------------------------
-# Streamlit Page setup
-# ----------------------------
-st.set_page_config(page_title="SPY Markov & HMM — Visual Dashboard", layout="wide")
-st.title("SPY Markov Chains & Hidden Markov Models — Visual Dashboard")
+def downsample_ts(dates: pd.Series, values: pd.Series, max_pts: int = MAX_PTS):
+    """Time-based bucket sampling to cap points for faster plotting."""
+    n = len(values)
+    if n <= max_pts or n == 0:
+        return dates, values
+    step = int(np.ceil(n / max_pts))
+    return dates.iloc[::step].reset_index(drop=True), values.iloc[::step].reset_index(drop=True)
 
 # ----------------------------
 # Sidebar controls
 # ----------------------------
-with st.sidebar:
-    st.header("Data & States")
+st.sidebar.header("Data & States")
 
-    window_mode = st.radio(
-        "History window",
-        ["Full", "Last 5 years", "Last 10 years", "Custom"],
-        index=1
-    )
+# Practical defaults
+default_end = date.today()
+default_start = date(1993, 1, 1)
 
-    today = date.today()
-    if window_mode == "Full":
-        start_date = date(1993, 1, 1); end_date = today
-    elif window_mode == "Last 5 years":
-        end_date = today; start_date = date(end_date.year - 5, end_date.month, end_date.day)
-    elif window_mode == "Last 10 years":
-        end_date = today; start_date = date(end_date.year - 10, end_date.month, end_date.day)
-    else:
-        start_date = st.date_input("Start date", value=date(2015, 1, 1))
-        end_date   = st.date_input("End date", value=today)
+start_date = st.sidebar.date_input("Start date", default_start)
+end_date   = st.sidebar.date_input("End date",   default_end)
 
-    st.markdown("---")
+state_mode = st.sidebar.selectbox("State mode (Markov)", ["binary", "tri"])
+threshold_bps = st.sidebar.number_input("Threshold (returns, bps)", min_value=0.0, value=0.0, step=5.0)
+threshold = threshold_bps / 10000.0  # convert bps → decimal
 
-    state_mode = st.selectbox(
-        "State mode (Markov)",
-        ["binary", "ternary"],
-        index=0,
-        help="binary = Green/Red • ternary = Green/Neutral/Red"
-    )
+order = st.sidebar.slider("Markov order", 1, 4, 1)
 
-    thr_bps = st.slider(
-        "Return threshold (basis points)",
-        0, 50, 10, 1,
-        help="Size of a daily move to count as Green/Red. 1 bp = 0.01% (10 bps = 0.10%)."
-    )
-    threshold = thr_bps / 10000.0
+# Forecast horizons selector (we’ll use this in Part 3)
+horiz_choices = st.sidebar.multiselect(
+    "Forecast horizons (days)", options=[1,2,3,4], default=[1,2,3,4]
+)
 
-    order = st.slider("Markov order", 1, 4, 1)
-    multi_h = st.multiselect("Forecast horizons (days)", [1, 2, 3, 4, 5, 10, 20], default=[1, 2, 3, 4])
-
-    st.markdown("---")
-    st.header("HMM (optional)")
-    use_hmm = st.checkbox("Enable HMM analysis", value=True)
-    hmm_states = st.selectbox("# Hidden states", [2, 3], index=0)
-    use_rv = st.checkbox("Include realized volatility (RV20)", value=True)
-    hmm_years = st.slider("HMM train window (years)", 2, 25, 5, help="Fit on most-recent N years (saves memory).")
-    bull_thresh = st.slider("Signal: Bull prob threshold", 0.5, 0.9, 0.6, 0.05)
-    bear_thresh = st.slider("Signal: Bear prob threshold", 0.5, 0.9, 0.6, 0.05)
+st.sidebar.markdown("---")
+st.sidebar.subheader("HMM (optional)")
+use_hmm = st.sidebar.checkbox("Enable HMM analysis", value=True)
+hmm_states = st.sidebar.selectbox("Hidden states", [2,3], index=0)
+hmm_years  = st.sidebar.slider("HMM train window (years)", 3, 25, 5)
+use_rv     = st.sidebar.checkbox("Include realized volatility (RV20)", value=True)
+bull_thresh = st.sidebar.slider("Signal: Bull prob threshold", 0.50, 0.90, 0.60, step=0.01)
+bear_thresh = st.sidebar.slider("Signal: Bear prob threshold", 0.50, 0.90, 0.60, step=0.01)
 
 # ----------------------------
-# Data loading
+# Data loading (cached)
 # ----------------------------
-@st.cache_data(show_spinner=False, max_entries=2, ttl="2h")
-def load_spy(start, end):
-    """Download SPY and compute daily returns."""
+@st.cache_data(show_spinner=False, ttl="6h")
+def fetch_spy(start: date, end: date) -> pd.DataFrame:
+    import yfinance as yf
     df = yf.download("SPY", start=start, end=end, auto_adjust=False, progress=False)
     if df.empty:
-        st.error("No SPY data from yfinance.")
-        st.stop()
-
-    # Handle multi-level column names
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = ["_".join([str(c).strip() for c in tup if c]) for tup in df.columns.values]
-
+        return pd.DataFrame()
     df = df.reset_index().sort_values("Date").reset_index(drop=True)
 
-    # Find price column
-    candidates = [c for c in df.columns
-                  if ("adj close" in c.lower()) or (c.lower() == "close") or c.lower().endswith("_close")]
-    if not candidates:
-        st.error(f"Price column not found. Columns: {list(df.columns)}")
-        st.stop()
+    price_col = "Adj Close" if "Adj Close" in df.columns else "Close"
+    # basic fields
+    df["Price"] = df[price_col]
+    df["ret"] = df["Price"].pct_change()
 
-    price_col = candidates[0]
-    df.rename(columns={price_col: "Price"}, inplace=True)
-    df["Price"] = pd.to_numeric(df["Price"], downcast="float")
-    df["ret"] = df["Price"].pct_change().astype("float32")
-    df = df.dropna(subset=["Price", "ret"]).reset_index(drop=True)
-    return df
+    # reduce memory footprint
+    float_cols = [c for c in ["Open","High","Low","Close","Adj Close","Volume","Price","ret"] if c in df.columns]
+    for c in float_cols:
+        if df[c].dtype.kind in "fc":
+            df[c] = df[c].astype("float32")
 
-# Load SPY
-spy = load_spy(start_date, end_date)
+    return df.dropna(subset=["ret"]).reset_index(drop=True)
+
+spy = fetch_spy(start_date, end_date)
+if spy.empty:
+    st.error("Could not load SPY data for the selected window.")
+    st.stop()
+
+# ----------------------------
+# Helpers: state labeling & k-order transition (cached)
+# ----------------------------
+def _state_labels(ret: pd.Series, mode: str, thr: float):
+    """Return labels and state space for binary/tri using threshold thr."""
+    if mode == "binary":
+        labels = np.where(ret >= thr, "Green", "Red")
+        space = ["Green", "Red"]
+    else:
+        labels = np.where(ret < -thr, "Red", np.where(ret >= thr, "Green", "Neutral"))
+        space = ["Green", "Neutral", "Red"]
+    return pd.Series(labels, index=ret.index), space
+
+@st.cache_data(show_spinner=False)
+def k_order_transition(labels: pd.Series, order: int, state_space: list[str]) -> pd.DataFrame:
+    """Compute simple next-step transition matrix; rows sum to 1.
+       For order>1 we aggregate by the *last* state in the context (compact view)."""
+    from collections import Counter, defaultdict
+    counts = defaultdict(Counter)
+    for i in range(order, len(labels)):
+        ctx = tuple(labels.iloc[i-order:i])
+        nxt = labels.iloc[i]
+        counts[ctx][nxt] += 1
+
+    # Rows = last state in context (so table fits screen nicely)
+    rows = state_space
+    mat = pd.DataFrame(0.0, index=rows, columns=state_space)
+    for ctx, cnt in counts.items():
+        row = ctx[-1]  # last item of the context
+        tot = sum(cnt.values())
+        if tot:
+            for s, k in cnt.items():
+                mat.loc[row, s] += k / tot
+    # Normalize once more to be safe
+    mat = mat.div(mat.sum(axis=1).replace(0, 1), axis=0).clip(0, 1)
+    return mat
+
+# Precompute labels & states for later sections
+states_series, state_space = _state_labels(spy["ret"], state_mode, threshold)
+
+# Small header summary for every section to reuse later
+def compact_header(prefix: str, recent_context: str):
+    window_txt = f"Window: {start_date.isoformat()} → {end_date.isoformat()}"
+    thr_txt = f"Threshold: {int(threshold_bps)} bps ({threshold:.3%})"
+    mode_txt = "Binary (Green/Red)" if state_mode == "binary" else "Tri-state (Green/Neutral/Red)"
+    st.caption(
+        f"{prefix} • {mode_txt} • {window_txt} • {thr_txt} • Most recent state: "
+        f"{recent_context}"
+    )
 
 # ============================================================
 # Part 2 — Markov Chain (discretized returns)
