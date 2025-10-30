@@ -7,4 +7,3 @@ scikit-learn>=1.4
 hmmlearn>=0.3.2
 pyarrow>=14.0
 pytest
-pytest
