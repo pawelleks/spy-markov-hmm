@@ -1,0 +1,4 @@
+
+# Cache
+/data/raw/*.feather
+data/raw/*.feather
