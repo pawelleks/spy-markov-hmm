@@ -1,31 +1,24 @@
-import sys
-from pathlib import Path
-proj = Path(__file__).resolve().parents[0]
-if str(proj) not in sys.path:
-    sys.path.insert(0, str(proj))
+import pandas as pd
+import numpy as np
 
-import traceback
-try:
-    import src.data_io as dio
-    print('Loaded module:', dio.__file__)
-    cache = proj / 'data' / 'raw' / 'spy.feather'
-    print('Cache path:', cache)
-    print('Exists:', cache.exists())
-    df = dio.load_prices(str(cache))
-    print('Columns:', df.columns.tolist())
-    # show normalized map
-    def _norm(s: str):
-        import re
-        s2 = str(s).lower()
-        s2 = re.sub(r"[^a-z0-9]", " ", s2)
-        s2 = re.sub(r"\s+", " ", s2).strip()
-        return s2
-    for c in df.columns:
-        print('  ', c, '->', _norm(c))
-    # call add_returns
-    df2 = dio.add_returns(df)
-    print('add_returns succeeded, head:')
-    print(df2.head())
-except Exception:
-    traceback.print_exc()
+from src.data_io import add_returns
 
+
+def test_add_returns_basic():
+    # build a minimal DataFrame with Date and Adj Close columns
+    data = {
+        'Date': ["2020-01-01", "2020-01-02", "2020-01-03"],
+        'Adj Close': [100.0, 101.0, 102.0]
+    }
+    df = pd.DataFrame(data)
+    df['Date'] = pd.to_datetime(df['Date'])
+
+    out = add_returns(df)
+
+    # out should have 'ret' and two rows (first return is NaN and dropped)
+    assert 'ret' in out.columns
+    assert len(out) == 2
+
+    # check numeric values (approx)
+    expected = np.array([0.01, 0.00990099009900991])
+    np.testing.assert_allclose(out['ret'].to_numpy(), expected, rtol=1e-6, atol=1e-12)
