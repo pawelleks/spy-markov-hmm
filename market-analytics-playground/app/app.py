@@ -44,6 +44,15 @@ def styled_fig(size=(5, 3)):
 st.set_page_config(page_title="SPY Markov & HMM — Visual Dashboard", layout="wide")
 st.title("SPY Markov Chains & Hidden Markov Models — Visual Dashboard")
 
+# Visible version banner (UTC timestamp) — helps confirm which file is being served
+try:
+    from datetime import datetime, timezone
+    __version__ = f"Optimized V2 ({datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')})"
+except Exception:
+    __version__ = "Optimized V2 (unknown)"
+
+st.markdown(f"**Version:** {__version__}")
+
 # ----------------------------
 # Sidebar controls
 # ----------------------------
@@ -95,6 +104,31 @@ with st.sidebar:
     bull_thresh = st.slider("Signal: Bull prob threshold", 0.5, 0.9, 0.6, 0.05)
     bear_thresh = st.slider("Signal: Bear prob threshold", 0.5, 0.9, 0.6, 0.05)
 
+    # --- Full-history fetch control (deferred) ---
+    if 'fetch_full_request' not in st.session_state:
+        st.session_state['fetch_full_request'] = False
+    # If we already have full history cached in the session, show a small badge and offer a Refresh button
+    if st.session_state.get('spy_full') is None:
+        if st.button("Fetch full SPY history (1993 → today)", key="fetch_full"):
+            # We set a flag here; actual fetch is done later after load_spy is defined
+            st.session_state['fetch_full_request'] = True
+            st.info("Full history will be fetched (this may take a few seconds).")
+    else:
+        # show cached metadata and provide a refresh action
+        try:
+            sf = st.session_state.get('spy_full')
+            fh_rows = len(sf)
+            fh_start = pd.to_datetime(sf['Date'].min()).strftime('%Y-%m-%d')
+            fh_end = pd.to_datetime(sf['Date'].max()).strftime('%Y-%m-%d')
+            st.success(f"Full history cached: {fh_rows} rows • {fh_start} → {fh_end}")
+        except Exception:
+            st.info("Full history cached")
+        if st.button("Refresh full SPY history (1993 → today)", key="fetch_full_refresh"):
+            st.session_state['fetch_full_request'] = True
+            st.info("Refreshing full history (this may take a few seconds).")
+
+    st.caption("Data source: Yahoo Finance (via yfinance).")
+
 # ----------------------------
 # Data loading
 # ----------------------------
@@ -129,12 +163,33 @@ def load_spy(start, end):
 # Load SPY
 spy = load_spy(start_date, end_date)
 
+# show metadata: last available date & source in sidebar
+try:
+    last_date = spy['Date'].max()
+    last_date_str = pd.to_datetime(last_date).strftime("%Y-%m-%d")
+    st.sidebar.caption(f"SPY data: last available date: {last_date_str} • Source: Yahoo Finance (yfinance)")
+    # Also show a compact note on the main page for visibility
+    st.caption(f"SPY data last available: {last_date_str} — Source: Yahoo Finance (yfinance)")
+except Exception:
+    pass
+
+# If the user clicked the sidebar button earlier, perform the fetch now (load_spy is defined at this point)
+if st.session_state.get('fetch_full_request'):
+    with st.spinner("Fetching full SPY history (1993 → today)..."):
+        try:
+            spy_full = load_spy(date(1993, 1, 1), date.today())
+            st.session_state['spy_full'] = spy_full
+            st.success(f"Fetched full history: {len(spy_full)} rows; last date: {spy_full['Date'].max().date()}")
+        except Exception as e:
+            st.error(f"Failed to fetch full history: {e}")
+    # reset the request flag so it doesn't refire every rerun
+    st.session_state['fetch_full_request'] = False
+
 # ============================================================
 # Part 2 — Markov Chain (discretized returns)
 # ============================================================
 
 # ---------- helpers ----------
-from collections import defaultdict
 
 def label_states(r: pd.Series, mode: str, thr: float) -> pd.Series:
     """Discretize returns into states."""
@@ -468,11 +523,19 @@ if use_hmm and HMM_OK:
         perm_old = [human_to_old[n] for n in order_human]
         trans_h = pd.DataFrame(trans[np.ix_(perm_old, perm_old)], index=order_human, columns=order_human)
         post_cur_h = pd.DataFrame(post_cur[:, perm_old], columns=order_human)
+        # index posterior by the features' dates for robust slicing
+        try:
+            post_cur_h.index = pd.to_datetime(feats["Date"]).reset_index(drop=True)
+        except Exception:
+            post_cur_h.index = pd.to_datetime(feats["Date"].astype(str)).reset_index(drop=True)
 
         # Most-recent regime probabilities (current window)
         last_probs = post_cur_h.iloc[-1]
         last_probs_str = " · ".join([f"{n}: {p:.0%}" for n, p in last_probs.items()])
         st.caption(f"Most-recent regime probabilities → {last_probs_str}")
+
+        # ... later when creating post_full_h we'll set its index once post_full is computed
+        # (post_full is computed further below; keep this placeholder comment to indicate intent)
 
         # ---------- Chart: SPY price with regime overlay (CURRENT window) ----------
         st.markdown("### SPY Price with HMM-Detected Regimes")
@@ -516,7 +579,22 @@ if use_hmm and HMM_OK:
             # Always fetch full history (from 1993) for the long-term view
             return load_spy(date(1993, 1, 1), _end)
 
-        spy_full = _load_spy_full(end_date)
+        # Prefer a user-cached full-history (from sidebar action) to avoid re-downloading
+        if st.session_state.get('spy_full') is not None:
+            spy_full = st.session_state['spy_full']
+        else:
+            # When no cached full history exists, fetch up-to-today full history (1993 → today)
+            spy_full = _load_spy_full(date.today())
+
+        # Show full-history metadata persistently in the sidebar and on the page
+        try:
+            fh_rows = len(spy_full)
+            fh_start = pd.to_datetime(spy_full['Date'].min()).strftime('%Y-%m-%d')
+            fh_end = pd.to_datetime(spy_full['Date'].max()).strftime('%Y-%m-%d')
+            st.sidebar.caption(f"Full SPY history cached: {fh_rows} rows • {fh_start} → {fh_end}")
+            st.caption(f"Full SPY history: {fh_rows} rows • {fh_start} → {fh_end}")
+        except Exception:
+            pass
 
         feats_full = spy_full[["Date", "Price", "ret"]].copy()
         if use_rv:
@@ -526,6 +604,14 @@ if use_hmm and HMM_OK:
         X_full_hist = scaler.transform(feats_full[X_cols].astype("float32").values)
         post_full   = hmm.predict_proba(X_full_hist)
         post_full_h = pd.DataFrame(post_full[:, perm_old], columns=order_human)
+        # create a datetime index from feats_full dates so later .loc[date_cutoff:] works
+        try:
+            feats_full_dates = pd.to_datetime(feats_full["Date"]).reset_index(drop=True)
+        except Exception:
+            feats_full_dates = pd.to_datetime(feats_full["Date"].astype(str)).reset_index(drop=True)
+        # keep feats_full as positional (reset) but index the posterior by the datetime values
+        feats_full = feats_full.reset_index(drop=True)
+        post_full_h.index = feats_full_dates
         regime_full = post_full_h.idxmax(axis=1)
 
         st.markdown("### SPY Price with HMM-Detected Regimes — Full History")
@@ -622,27 +708,104 @@ if use_hmm and HMM_OK:
             )
 
             # Choose performance window without touching the main data window
-            perf_choice = st.selectbox(
-                "Performance window for strategies",
-                ["Use current data window", "Last 5 years", "Last 10 years", "Last 15 years", "Last 20 years"],
-                index=0,
-                help="This only affects the equity curves & table below."
-            )
             years_map = {
                 "Last 5 years": 5,
                 "Last 10 years": 10,
                 "Last 15 years": 15,
                 "Last 20 years": 20
             }
+            perf_choice = st.selectbox(
+                "Performance window for strategies",
+                ["Use current data window", "Last 5 years", "Last 10 years", "Last 15 years", "Last 20 years"],
+                index=0,
+                key="strategies_perf_choice",  # unique stable key for strategies selectbox
+                help="This only affects the equity curves & table below."
+            )
+
             if perf_choice == "Use current data window":
-                feats_perf = feats.copy()
+                # use the current-window posterior (indexed by Date)
+                feats_perf = feats.copy().reset_index(drop=True)
                 post_perf_h = post_cur_h.copy()
+                source_used = "current window"
             else:
                 ny = years_map[perf_choice]
-                cutoff_perf = feats["Date"].max() - pd.DateOffset(years=ny)
-                mask = feats["Date"] >= cutoff_perf
-                feats_perf = feats.loc[mask].reset_index(drop=True)
-                post_perf_h = post_cur_h.loc[mask].reset_index(drop=True)
+                # slice the full-history classification by date (more robust)
+                try:
+                    # basic validations
+                    if 'post_full_h' not in locals() or post_full_h is None or post_full_h.empty:
+                        raise ValueError("post_full_h missing or empty")
+                    if 'feats_full' not in locals() or feats_full is None or feats_full.empty:
+                        raise ValueError("feats_full missing or empty")
+
+                    # ensure we have datetime representations
+                    feats_full_dates = pd.to_datetime(feats_full['Date'])
+                    # cutoff based on the full-history dates
+                    cutoff_perf = feats_full_dates.max() - pd.DateOffset(years=ny)
+
+                    # slice posterior by datetime index; ensure posterior index is datetime
+                    try:
+                        post_idx = pd.to_datetime(post_full_h.index)
+                    except Exception:
+                        # try aligning posterior with feats_full dates if index isn't datetime
+                        post_full_h.index = pd.to_datetime(feats_full_dates).reset_index(drop=True)
+                        post_idx = pd.to_datetime(post_full_h.index)
+
+                    # mask posterior and feats by cutoff
+                    post_mask = post_idx >= cutoff_perf
+                    feats_mask = feats_full_dates >= cutoff_perf
+
+                    post_perf_h = post_full_h.loc[post_idx[post_mask]]
+                    feats_perf = feats_full.loc[feats_mask].reset_index(drop=True)
+                    source_used = "full history"
+
+                    # If lengths mismatch, try reindexing posterior to feats_perf dates (best alignment)
+                    if len(post_perf_h) != len(feats_perf):
+                        try:
+                            reidx_dates = pd.to_datetime(feats_perf['Date']).reset_index(drop=True)
+                            post_perf_h = post_full_h.reindex(reidx_dates).reset_index(drop=True)
+                        except Exception:
+                            # final fallback to align by taking the last N rows
+                            n = min(len(feats_perf), len(post_perf_h))
+                            if n > 0:
+                                feats_perf = feats_perf.iloc[-n:].reset_index(drop=True)
+                                post_perf_h = post_perf_h.iloc[-n:].reset_index(drop=True)
+
+                    # If still empty after all attempts, fallback to current window
+                    if feats_perf.empty or (hasattr(post_perf_h, 'empty') and post_perf_h.empty) or len(feats_perf) == 0:
+                        st.warning(f"No data for chosen performance window ({perf_choice}); using current data window instead.")
+                        feats_perf = feats.copy().reset_index(drop=True)
+                        post_perf_h = post_cur_h.copy()
+                        source_used = "current window (fallback)"
+                except Exception as e:
+                    # provide a helpful message in the UI for debugging
+                    st.warning("Full-history data unavailable or misaligned; using current data window for performance analysis.")
+                    st.caption(f"Debug: full-history slice failed: {e}")
+                    feats_perf = feats.copy().reset_index(drop=True)
+                    post_perf_h = post_cur_h.copy()
+                    source_used = "current window (fallback)"
+
+            # Show performance-window metadata and ensure alignment
+            try:
+                start_perf = pd.to_datetime(feats_perf['Date'].min()).strftime('%Y-%m-%d')
+                end_perf = pd.to_datetime(feats_perf['Date'].max()).strftime('%Y-%m-%d')
+            except Exception:
+                start_perf = feats_perf['Date'].min(); end_perf = feats_perf['Date'].max()
+
+            st.caption(f"Performance window: {perf_choice} — rows: {len(feats_perf)} — Date range: {start_perf} → {end_perf} (source: {source_used})")
+
+            # If post_perf_h is indexed by Date, ensure it's reset to align with feats_perf rows
+            if hasattr(post_perf_h, 'index') and not isinstance(post_perf_h.index, pd.RangeIndex):
+                # align by Date values explicitly
+                try:
+                    # convert feats_perf Date to datetime index and reindex posterior to those dates
+                    idx = pd.to_datetime(feats_perf['Date']).reset_index(drop=True)
+                    post_perf_h = post_perf_h.reindex(idx).reset_index(drop=True)
+                except Exception:
+                    # fallback: positional trim
+                    if len(feats_perf) != len(post_perf_h):
+                        n = min(len(feats_perf), len(post_perf_h))
+                        feats_perf = feats_perf.iloc[-n:].reset_index(drop=True)
+                        post_perf_h = post_perf_h.iloc[-n:].reset_index(drop=True)
 
             # Signals & equity curves for the chosen window
             bull_p = post_perf_h.get("Bull", pd.Series(0, index=feats_perf.index)).values
