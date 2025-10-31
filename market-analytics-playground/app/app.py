@@ -107,16 +107,37 @@ def fetch_spy(start: date, end: date) -> pd.DataFrame:
         return pd.DataFrame()
     df = df.reset_index().sort_values("Date").reset_index(drop=True)
 
-    price_col = "Adj Close" if "Adj Close" in df.columns else "Close"
+    # Flatten MultiIndex columns (if yfinance returns multi-level columns for tickers)
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = ['_'.join([str(x) for x in col]).strip('_') for col in df.columns]
+
+    # Find a sensible price column (prefer Adj Close, fall back to Close)
+    def _find_col(preferred):
+        for p in preferred:
+            for c in df.columns:
+                if p in str(c):
+                    return c
+        return None
+
+    price_col = _find_col(["Adj Close", "Close"]) or "Close"
+
     # basic fields
     df["Price"] = df[price_col]
     df["ret"] = df["Price"].pct_change()
 
-    # reduce memory footprint
-    float_cols = [c for c in ["Open","High","Low","Close","Adj Close","Volume","Price","ret"] if c in df.columns]
-    for c in float_cols:
-        if df[c].dtype.kind in "fc":
-            df[c] = df[c].astype("float32")
+    # reduce memory footprint: downcast numeric columns we care about
+    candidate_cols = [c for c in ["Open", "High", "Low", "Close", "Adj Close", "Volume", "Price", "ret"] if any(c in str(col) for col in df.columns)]
+    for c in df.columns:
+        # only operate on candidate-like names
+        if not any(cc in str(c) for cc in candidate_cols):
+            continue
+        try:
+            # coerce numeric and downcast to float32 if numeric
+            if pd.api.types.is_numeric_dtype(df[c]):
+                df[c] = pd.to_numeric(df[c], errors='coerce').astype('float32')
+        except Exception:
+            # if the column behaves unexpectedly (e.g., multi-column slice), skip it
+            continue
 
     return df.dropna(subset=["ret"]).reset_index(drop=True)
 
@@ -225,7 +246,7 @@ state_space = ["G", "R"] if state_mode == "binary" else ["G", "N", "R"]
 
 mode_caption   = "Binary (Green/Red)" if state_mode == "binary" else "Ternary (Green/Neutral/Red)"
 window_caption = f"{start_date.isoformat()} → {end_date.isoformat()}"
-thr_caption    = f"Threshold: {thr_bps} bps ({threshold:.3%}) for Green"
+thr_caption    = f"Threshold: {int(threshold_bps)} bps ({threshold:.3%}) for Green"
 
 context_raw_k   = "-".join(states_series.iloc[-order:].tolist())
 context_human_k = "-".join(RENAME.get(p, p) for p in context_raw_k.split("-"))
@@ -354,7 +375,9 @@ if not mat.empty:
         pi[state_space.index(s1.iloc[-1])] = 1.0
 
         results = []
-        for h in sorted(multi_h):
+        # use horizons selected in the sidebar (horiz_choices)
+        multi_h = sorted(horiz_choices) if 'horiz_choices' in globals() else [1,2,3,4]
+        for h in multi_h:
             Ph = np.linalg.matrix_power(P, h)
             pi_h = pi @ Ph
             results.append({
@@ -757,3 +780,4 @@ if use_hmm and HMM_OK:
                 "Values above 1.0 mean profits; below 1.0 indicate losses.  "
                 "A flat line in **Long/Neutral** means the strategy is in cash (no exposure) outside Bull regimes."
             )
+
