@@ -1,5 +1,5 @@
 # ============================================================
-# Part 1 — Setup, Sidebar, and Data Loading (optimized)
+# Part 1 — Setup, Sidebar, and Data Loading
 # ============================================================
 import warnings
 warnings.filterwarnings("ignore")
@@ -7,29 +7,10 @@ warnings.filterwarnings("ignore")
 import streamlit as st
 import pandas as pd
 import numpy as np
+import yfinance as yf
 import matplotlib.pyplot as plt
-from datetime import date, timedelta
-
-# Set page early
-st.set_page_config(
-    page_title="SPY Markov & HMM Dashboard",
-    page_icon="📈",
-    layout="wide"
-)
-
-# ----------------------------
-# Performance knobs
-# ----------------------------
-MAX_PTS   = 2500          # max points drawn per chart (auto downsample)
-PRICE_COL = "Adj Close"   # preferred price column
-RAND_SEED = 42            # deterministic HMM behavior
-
-np.random.seed(RAND_SEED)
-
-import matplotlib as mpl
-mpl.rcParams["path.simplify"] = True
-mpl.rcParams["path.simplify_threshold"] = 0.6
-mpl.rcParams["agg.path.chunksize"] = 20000  # speed up long paths
+from datetime import date
+from collections import defaultdict
 
 # ----------------------------
 # Dark theme helpers (TrendSpider-ish)
@@ -44,164 +25,171 @@ RED      = "#f44336"
 NEUTRAL  = "#9e9e9e"
 
 def styled_fig(size=(5, 3)):
+    """Create a dark-styled matplotlib figure/axes."""
     fig, ax = plt.subplots(figsize=size)
-    fig.set_facecolor(DARK_BG)
+    fig.patch.set_facecolor(DARK_BG)
     ax.set_facecolor(DARK_AX)
-    for spine in ax.spines.values():
-        spine.set_color(GRID)
+    for s in ax.spines.values():
+        s.set_color(GRID)
     ax.tick_params(colors=FG, labelsize=9)
     ax.xaxis.label.set_color(FG)
     ax.yaxis.label.set_color(FG)
     ax.title.set_color(FG)
-    ax.grid(True, color=GRID, linewidth=0.6, alpha=0.6)
+    ax.grid(True, color=GRID, alpha=0.6, linewidth=0.8)
     return fig, ax
 
-def downsample_ts(dates: pd.Series, values: pd.Series, max_pts: int = MAX_PTS):
-    """Time-based bucket sampling to cap points for faster plotting."""
-    n = len(values)
-    if n <= max_pts or n == 0:
-        return dates, values
-    step = int(np.ceil(n / max_pts))
-    return dates.iloc[::step].reset_index(drop=True), values.iloc[::step].reset_index(drop=True)
+# ----------------------------
+# Streamlit Page setup
+# ----------------------------
+st.set_page_config(page_title="SPY Markov & HMM — Visual Dashboard", layout="wide")
+st.title("SPY Markov Chains & Hidden Markov Models — Visual Dashboard")
+
+# Visible version banner (UTC timestamp) — helps confirm which file is being served
+try:
+    from datetime import datetime, timezone
+    __version__ = f"Optimized V2 ({datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')})"
+except Exception:
+    __version__ = "Optimized V2 (unknown)"
+
+st.markdown(f"**Version:** {__version__}")
 
 # ----------------------------
 # Sidebar controls
 # ----------------------------
-st.sidebar.header("Data & States")
+with st.sidebar:
+    st.header("Data & States")
 
-# Practical defaults
-default_end = date.today()
-default_start = date(1993, 1, 1)
+    window_mode = st.radio(
+        "History window",
+        ["Full", "Last 5 years", "Last 10 years", "Custom"],
+        index=1
+    )
 
-start_date = st.sidebar.date_input("Start date", default_start)
-end_date   = st.sidebar.date_input("End date",   default_end)
+    today = date.today()
+    if window_mode == "Full":
+        start_date = date(1993, 1, 1); end_date = today
+    elif window_mode == "Last 5 years":
+        end_date = today; start_date = date(end_date.year - 5, end_date.month, end_date.day)
+    elif window_mode == "Last 10 years":
+        end_date = today; start_date = date(end_date.year - 10, end_date.month, end_date.day)
+    else:
+        start_date = st.date_input("Start date", value=date(2015, 1, 1))
+        end_date   = st.date_input("End date", value=today)
 
-state_mode = st.sidebar.selectbox("State mode (Markov)", ["binary", "tri"])
-threshold_bps = st.sidebar.number_input("Threshold (returns, bps)", min_value=0.0, value=0.0, step=5.0)
-threshold = threshold_bps / 10000.0  # convert bps → decimal
+    st.markdown("---")
 
-order = st.sidebar.slider("Markov order", 1, 4, 1)
+    state_mode = st.selectbox(
+        "State mode (Markov)",
+        ["binary", "ternary"],
+        index=0,
+        help="binary = Green/Red • ternary = Green/Neutral/Red"
+    )
 
-# Forecast horizons selector (we’ll use this in Part 3)
-horiz_choices = st.sidebar.multiselect(
-    "Forecast horizons (days)", options=[1,2,3,4], default=[1,2,3,4]
-)
+    thr_bps = st.slider(
+        "Return threshold (basis points)",
+        0, 50, 10, 1,
+        help="Size of a daily move to count as Green/Red. 1 bp = 0.01% (10 bps = 0.10%)."
+    )
+    threshold = thr_bps / 10000.0
 
-st.sidebar.markdown("---")
-st.sidebar.subheader("HMM (optional)")
-use_hmm = st.sidebar.checkbox("Enable HMM analysis", value=True)
-hmm_states = st.sidebar.selectbox("Hidden states", [2,3], index=0)
-hmm_years  = st.sidebar.slider("HMM train window (years)", 3, 25, 5)
-use_rv     = st.sidebar.checkbox("Include realized volatility (RV20)", value=True)
-bull_thresh = st.sidebar.slider("Signal: Bull prob threshold", 0.50, 0.90, 0.60, step=0.01)
-bear_thresh = st.sidebar.slider("Signal: Bear prob threshold", 0.50, 0.90, 0.60, step=0.01)
+    order = st.slider("Markov order", 1, 4, 1)
+    multi_h = st.multiselect("Forecast horizons (days)", [1, 2, 3, 4, 5, 10, 20], default=[1, 2, 3, 4])
+
+    st.markdown("---")
+    st.header("HMM (optional)")
+    use_hmm = st.checkbox("Enable HMM analysis", value=True)
+    hmm_states = st.selectbox("# Hidden states", [2, 3], index=0)
+    use_rv = st.checkbox("Include realized volatility (RV20)", value=True)
+    hmm_years = st.slider("HMM train window (years)", 2, 25, 5, help="Fit on most-recent N years (saves memory).")
+    bull_thresh = st.slider("Signal: Bull prob threshold", 0.5, 0.9, 0.6, 0.05)
+    bear_thresh = st.slider("Signal: Bear prob threshold", 0.5, 0.9, 0.6, 0.05)
+
+    # --- Full-history fetch control (deferred) ---
+    if 'fetch_full_request' not in st.session_state:
+        st.session_state['fetch_full_request'] = False
+    # If we already have full history cached in the session, show a small badge and offer a Refresh button
+    if st.session_state.get('spy_full') is None:
+        if st.button("Fetch full SPY history (1993 → today)", key="fetch_full"):
+            # We set a flag here; actual fetch is done later after load_spy is defined
+            st.session_state['fetch_full_request'] = True
+            st.info("Full history will be fetched (this may take a few seconds).")
+    else:
+        # show cached metadata and provide a refresh action
+        try:
+            sf = st.session_state.get('spy_full')
+            fh_rows = len(sf)
+            fh_start = pd.to_datetime(sf['Date'].min()).strftime('%Y-%m-%d')
+            fh_end = pd.to_datetime(sf['Date'].max()).strftime('%Y-%m-%d')
+            st.success(f"Full history cached: {fh_rows} rows • {fh_start} → {fh_end}")
+        except Exception:
+            st.info("Full history cached")
+        if st.button("Refresh full SPY history (1993 → today)", key="fetch_full_refresh"):
+            st.session_state['fetch_full_request'] = True
+            st.info("Refreshing full history (this may take a few seconds).")
+
+    st.caption("Data source: Yahoo Finance (via yfinance).")
 
 # ----------------------------
-# Data loading (cached)
+# Data loading
 # ----------------------------
-@st.cache_data(show_spinner=False, ttl="6h")
-def fetch_spy(start: date, end: date) -> pd.DataFrame:
-    import yfinance as yf
+@st.cache_data(show_spinner=False, max_entries=2, ttl="2h")
+def load_spy(start, end):
+    """Download SPY and compute daily returns."""
     df = yf.download("SPY", start=start, end=end, auto_adjust=False, progress=False)
     if df.empty:
-        return pd.DataFrame()
+        st.error("No SPY data from yfinance.")
+        st.stop()
+
+    # Handle multi-level column names
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = ["_".join([str(c).strip() for c in tup if c]) for tup in df.columns.values]
+
     df = df.reset_index().sort_values("Date").reset_index(drop=True)
 
-    # Flatten MultiIndex columns (if yfinance returns multi-level columns for tickers)
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = ['_'.join([str(x) for x in col]).strip('_') for col in df.columns]
+    # Find price column
+    candidates = [c for c in df.columns
+                  if ("adj close" in c.lower()) or (c.lower() == "close") or c.lower().endswith("_close")]
+    if not candidates:
+        st.error(f"Price column not found. Columns: {list(df.columns)}")
+        st.stop()
 
-    # Find a sensible price column (prefer Adj Close, fall back to Close)
-    def _find_col(preferred):
-        for p in preferred:
-            for c in df.columns:
-                if p in str(c):
-                    return c
-        return None
+    price_col = candidates[0]
+    df.rename(columns={price_col: "Price"}, inplace=True)
+    df["Price"] = pd.to_numeric(df["Price"], downcast="float")
+    df["ret"] = df["Price"].pct_change().astype("float32")
+    df = df.dropna(subset=["Price", "ret"]).reset_index(drop=True)
+    return df
 
-    price_col = _find_col(["Adj Close", "Close"]) or "Close"
+# Load SPY
+spy = load_spy(start_date, end_date)
 
-    # basic fields
-    df["Price"] = df[price_col]
-    df["ret"] = df["Price"].pct_change()
+# show metadata: last available date & source in sidebar
+try:
+    last_date = spy['Date'].max()
+    last_date_str = pd.to_datetime(last_date).strftime("%Y-%m-%d")
+    st.sidebar.caption(f"SPY data: last available date: {last_date_str} • Source: Yahoo Finance (yfinance)")
+    # Also show a compact note on the main page for visibility
+    st.caption(f"SPY data last available: {last_date_str} — Source: Yahoo Finance (yfinance)")
+except Exception:
+    pass
 
-    # reduce memory footprint: downcast numeric columns we care about
-    candidate_cols = [c for c in ["Open", "High", "Low", "Close", "Adj Close", "Volume", "Price", "ret"] if any(c in str(col) for col in df.columns)]
-    for c in df.columns:
-        # only operate on candidate-like names
-        if not any(cc in str(c) for cc in candidate_cols):
-            continue
+# If the user clicked the sidebar button earlier, perform the fetch now (load_spy is defined at this point)
+if st.session_state.get('fetch_full_request'):
+    with st.spinner("Fetching full SPY history (1993 → today)..."):
         try:
-            # coerce numeric and downcast to float32 if numeric
-            if pd.api.types.is_numeric_dtype(df[c]):
-                df[c] = pd.to_numeric(df[c], errors='coerce').astype('float32')
-        except Exception:
-            # if the column behaves unexpectedly (e.g., multi-column slice), skip it
-            continue
-
-    return df.dropna(subset=["ret"]).reset_index(drop=True)
-
-spy = fetch_spy(start_date, end_date)
-if spy.empty:
-    st.error("Could not load SPY data for the selected window.")
-    st.stop()
-
-# ----------------------------
-# Helpers: state labeling & k-order transition (cached)
-# ----------------------------
-def _state_labels(ret: pd.Series, mode: str, thr: float):
-    """Return labels and state space for binary/tri using threshold thr."""
-    if mode == "binary":
-        labels = np.where(ret >= thr, "Green", "Red")
-        space = ["Green", "Red"]
-    else:
-        labels = np.where(ret < -thr, "Red", np.where(ret >= thr, "Green", "Neutral"))
-        space = ["Green", "Neutral", "Red"]
-    return pd.Series(labels, index=ret.index), space
-
-@st.cache_data(show_spinner=False)
-def k_order_transition(labels: pd.Series, order: int, state_space: list[str]) -> pd.DataFrame:
-    """Compute simple next-step transition matrix; rows sum to 1.
-       For order>1 we aggregate by the *last* state in the context (compact view)."""
-    from collections import Counter, defaultdict
-    counts = defaultdict(Counter)
-    for i in range(order, len(labels)):
-        ctx = tuple(labels.iloc[i-order:i])
-        nxt = labels.iloc[i]
-        counts[ctx][nxt] += 1
-
-    # Rows = last state in context (so table fits screen nicely)
-    rows = state_space
-    mat = pd.DataFrame(0.0, index=rows, columns=state_space)
-    for ctx, cnt in counts.items():
-        row = ctx[-1]  # last item of the context
-        tot = sum(cnt.values())
-        if tot:
-            for s, k in cnt.items():
-                mat.loc[row, s] += k / tot
-    # Normalize once more to be safe
-    mat = mat.div(mat.sum(axis=1).replace(0, 1), axis=0).clip(0, 1)
-    return mat
-
-# Precompute labels & states for later sections
-states_series, state_space = _state_labels(spy["ret"], state_mode, threshold)
-
-# Small header summary for every section to reuse later
-def compact_header(prefix: str, recent_context: str):
-    window_txt = f"Window: {start_date.isoformat()} → {end_date.isoformat()}"
-    thr_txt = f"Threshold: {int(threshold_bps)} bps ({threshold:.3%})"
-    mode_txt = "Binary (Green/Red)" if state_mode == "binary" else "Tri-state (Green/Neutral/Red)"
-    st.caption(
-        f"{prefix} • {mode_txt} • {window_txt} • {thr_txt} • Most recent state: "
-        f"{recent_context}"
-    )
+            spy_full = load_spy(date(1993, 1, 1), date.today())
+            st.session_state['spy_full'] = spy_full
+            st.success(f"Fetched full history: {len(spy_full)} rows; last date: {spy_full['Date'].max().date()}")
+        except Exception as e:
+            st.error(f"Failed to fetch full history: {e}")
+    # reset the request flag so it doesn't refire every rerun
+    st.session_state['fetch_full_request'] = False
 
 # ============================================================
 # Part 2 — Markov Chain (discretized returns)
 # ============================================================
 
 # ---------- helpers ----------
-from collections import defaultdict
 
 def label_states(r: pd.Series, mode: str, thr: float) -> pd.Series:
     """Discretize returns into states."""
@@ -246,7 +234,7 @@ state_space = ["G", "R"] if state_mode == "binary" else ["G", "N", "R"]
 
 mode_caption   = "Binary (Green/Red)" if state_mode == "binary" else "Ternary (Green/Neutral/Red)"
 window_caption = f"{start_date.isoformat()} → {end_date.isoformat()}"
-thr_caption    = f"Threshold: {int(threshold_bps)} bps ({threshold:.3%}) for Green"
+thr_caption    = f"Threshold: {thr_bps} bps ({threshold:.3%}) for Green"
 
 context_raw_k   = "-".join(states_series.iloc[-order:].tolist())
 context_human_k = "-".join(RENAME.get(p, p) for p in context_raw_k.split("-"))
@@ -375,9 +363,7 @@ if not mat.empty:
         pi[state_space.index(s1.iloc[-1])] = 1.0
 
         results = []
-        # use horizons selected in the sidebar (horiz_choices)
-        multi_h = sorted(horiz_choices) if 'horiz_choices' in globals() else [1,2,3,4]
-        for h in multi_h:
+        for h in sorted(multi_h):
             Ph = np.linalg.matrix_power(P, h)
             pi_h = pi @ Ph
             results.append({
@@ -537,11 +523,19 @@ if use_hmm and HMM_OK:
         perm_old = [human_to_old[n] for n in order_human]
         trans_h = pd.DataFrame(trans[np.ix_(perm_old, perm_old)], index=order_human, columns=order_human)
         post_cur_h = pd.DataFrame(post_cur[:, perm_old], columns=order_human)
+        # index posterior by the features' dates for robust slicing
+        try:
+            post_cur_h.index = pd.to_datetime(feats["Date"]).reset_index(drop=True)
+        except Exception:
+            post_cur_h.index = pd.to_datetime(feats["Date"].astype(str)).reset_index(drop=True)
 
         # Most-recent regime probabilities (current window)
         last_probs = post_cur_h.iloc[-1]
         last_probs_str = " · ".join([f"{n}: {p:.0%}" for n, p in last_probs.items()])
         st.caption(f"Most-recent regime probabilities → {last_probs_str}")
+
+        # ... later when creating post_full_h we'll set its index once post_full is computed
+        # (post_full is computed further below; keep this placeholder comment to indicate intent)
 
         # ---------- Chart: SPY price with regime overlay (CURRENT window) ----------
         st.markdown("### SPY Price with HMM-Detected Regimes")
@@ -585,7 +579,22 @@ if use_hmm and HMM_OK:
             # Always fetch full history (from 1993) for the long-term view
             return load_spy(date(1993, 1, 1), _end)
 
-        spy_full = _load_spy_full(end_date)
+        # Prefer a user-cached full-history (from sidebar action) to avoid re-downloading
+        if st.session_state.get('spy_full') is not None:
+            spy_full = st.session_state['spy_full']
+        else:
+            # When no cached full history exists, fetch up-to-today full history (1993 → today)
+            spy_full = _load_spy_full(date.today())
+
+        # Show full-history metadata persistently in the sidebar and on the page
+        try:
+            fh_rows = len(spy_full)
+            fh_start = pd.to_datetime(spy_full['Date'].min()).strftime('%Y-%m-%d')
+            fh_end = pd.to_datetime(spy_full['Date'].max()).strftime('%Y-%m-%d')
+            st.sidebar.caption(f"Full SPY history cached: {fh_rows} rows • {fh_start} → {fh_end}")
+            st.caption(f"Full SPY history: {fh_rows} rows • {fh_start} → {fh_end}")
+        except Exception:
+            pass
 
         feats_full = spy_full[["Date", "Price", "ret"]].copy()
         if use_rv:
@@ -595,6 +604,14 @@ if use_hmm and HMM_OK:
         X_full_hist = scaler.transform(feats_full[X_cols].astype("float32").values)
         post_full   = hmm.predict_proba(X_full_hist)
         post_full_h = pd.DataFrame(post_full[:, perm_old], columns=order_human)
+        # create a datetime index from feats_full dates so later .loc[date_cutoff:] works
+        try:
+            feats_full_dates = pd.to_datetime(feats_full["Date"]).reset_index(drop=True)
+        except Exception:
+            feats_full_dates = pd.to_datetime(feats_full["Date"].astype(str)).reset_index(drop=True)
+        # keep feats_full as positional (reset) but index the posterior by the datetime values
+        feats_full = feats_full.reset_index(drop=True)
+        post_full_h.index = feats_full_dates
         regime_full = post_full_h.idxmax(axis=1)
 
         st.markdown("### SPY Price with HMM-Detected Regimes — Full History")
@@ -691,27 +708,104 @@ if use_hmm and HMM_OK:
             )
 
             # Choose performance window without touching the main data window
-            perf_choice = st.selectbox(
-                "Performance window for strategies",
-                ["Use current data window", "Last 5 years", "Last 10 years", "Last 15 years", "Last 20 years"],
-                index=0,
-                help="This only affects the equity curves & table below."
-            )
             years_map = {
                 "Last 5 years": 5,
                 "Last 10 years": 10,
                 "Last 15 years": 15,
                 "Last 20 years": 20
             }
+            perf_choice = st.selectbox(
+                "Performance window for strategies",
+                ["Use current data window", "Last 5 years", "Last 10 years", "Last 15 years", "Last 20 years"],
+                index=0,
+                key="strategies_perf_choice",  # unique stable key for strategies selectbox
+                help="This only affects the equity curves & table below."
+            )
+
             if perf_choice == "Use current data window":
-                feats_perf = feats.copy()
+                # use the current-window posterior (indexed by Date)
+                feats_perf = feats.copy().reset_index(drop=True)
                 post_perf_h = post_cur_h.copy()
+                source_used = "current window"
             else:
                 ny = years_map[perf_choice]
-                cutoff_perf = feats["Date"].max() - pd.DateOffset(years=ny)
-                mask = feats["Date"] >= cutoff_perf
-                feats_perf = feats.loc[mask].reset_index(drop=True)
-                post_perf_h = post_cur_h.loc[mask].reset_index(drop=True)
+                # slice the full-history classification by date (more robust)
+                try:
+                    # basic validations
+                    if 'post_full_h' not in locals() or post_full_h is None or post_full_h.empty:
+                        raise ValueError("post_full_h missing or empty")
+                    if 'feats_full' not in locals() or feats_full is None or feats_full.empty:
+                        raise ValueError("feats_full missing or empty")
+
+                    # ensure we have datetime representations
+                    feats_full_dates = pd.to_datetime(feats_full['Date'])
+                    # cutoff based on the full-history dates
+                    cutoff_perf = feats_full_dates.max() - pd.DateOffset(years=ny)
+
+                    # slice posterior by datetime index; ensure posterior index is datetime
+                    try:
+                        post_idx = pd.to_datetime(post_full_h.index)
+                    except Exception:
+                        # try aligning posterior with feats_full dates if index isn't datetime
+                        post_full_h.index = pd.to_datetime(feats_full_dates).reset_index(drop=True)
+                        post_idx = pd.to_datetime(post_full_h.index)
+
+                    # mask posterior and feats by cutoff
+                    post_mask = post_idx >= cutoff_perf
+                    feats_mask = feats_full_dates >= cutoff_perf
+
+                    post_perf_h = post_full_h.loc[post_idx[post_mask]]
+                    feats_perf = feats_full.loc[feats_mask].reset_index(drop=True)
+                    source_used = "full history"
+
+                    # If lengths mismatch, try reindexing posterior to feats_perf dates (best alignment)
+                    if len(post_perf_h) != len(feats_perf):
+                        try:
+                            reidx_dates = pd.to_datetime(feats_perf['Date']).reset_index(drop=True)
+                            post_perf_h = post_full_h.reindex(reidx_dates).reset_index(drop=True)
+                        except Exception:
+                            # final fallback to align by taking the last N rows
+                            n = min(len(feats_perf), len(post_perf_h))
+                            if n > 0:
+                                feats_perf = feats_perf.iloc[-n:].reset_index(drop=True)
+                                post_perf_h = post_perf_h.iloc[-n:].reset_index(drop=True)
+
+                    # If still empty after all attempts, fallback to current window
+                    if feats_perf.empty or (hasattr(post_perf_h, 'empty') and post_perf_h.empty) or len(feats_perf) == 0:
+                        st.warning(f"No data for chosen performance window ({perf_choice}); using current data window instead.")
+                        feats_perf = feats.copy().reset_index(drop=True)
+                        post_perf_h = post_cur_h.copy()
+                        source_used = "current window (fallback)"
+                except Exception as e:
+                    # provide a helpful message in the UI for debugging
+                    st.warning("Full-history data unavailable or misaligned; using current data window for performance analysis.")
+                    st.caption(f"Debug: full-history slice failed: {e}")
+                    feats_perf = feats.copy().reset_index(drop=True)
+                    post_perf_h = post_cur_h.copy()
+                    source_used = "current window (fallback)"
+
+            # Show performance-window metadata and ensure alignment
+            try:
+                start_perf = pd.to_datetime(feats_perf['Date'].min()).strftime('%Y-%m-%d')
+                end_perf = pd.to_datetime(feats_perf['Date'].max()).strftime('%Y-%m-%d')
+            except Exception:
+                start_perf = feats_perf['Date'].min(); end_perf = feats_perf['Date'].max()
+
+            st.caption(f"Performance window: {perf_choice} — rows: {len(feats_perf)} — Date range: {start_perf} → {end_perf} (source: {source_used})")
+
+            # If post_perf_h is indexed by Date, ensure it's reset to align with feats_perf rows
+            if hasattr(post_perf_h, 'index') and not isinstance(post_perf_h.index, pd.RangeIndex):
+                # align by Date values explicitly
+                try:
+                    # convert feats_perf Date to datetime index and reindex posterior to those dates
+                    idx = pd.to_datetime(feats_perf['Date']).reset_index(drop=True)
+                    post_perf_h = post_perf_h.reindex(idx).reset_index(drop=True)
+                except Exception:
+                    # fallback: positional trim
+                    if len(feats_perf) != len(post_perf_h):
+                        n = min(len(feats_perf), len(post_perf_h))
+                        feats_perf = feats_perf.iloc[-n:].reset_index(drop=True)
+                        post_perf_h = post_perf_h.iloc[-n:].reset_index(drop=True)
 
             # Signals & equity curves for the chosen window
             bull_p = post_perf_h.get("Bull", pd.Series(0, index=feats_perf.index)).values
@@ -780,4 +874,3 @@ if use_hmm and HMM_OK:
                 "Values above 1.0 mean profits; below 1.0 indicate losses.  "
                 "A flat line in **Long/Neutral** means the strategy is in cash (no exposure) outside Bull regimes."
             )
-
