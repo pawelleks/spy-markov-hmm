@@ -4,10 +4,7 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="50d94d65-e749-4a1c-9be7-88e5f5b43d9c" name="Changes" comment="">
-      <change beforePath="$PROJECT_DIR$/market-analytics-playground/app/app.py" beforeDir="false" afterPath="$PROJECT_DIR$/market-analytics-playground/app/app.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/market-analytics-playground/test_strategy_window_e2e.py" beforeDir="false" afterPath="$PROJECT_DIR$/market-analytics-playground/test_strategy_window_e2e.py" afterDir="false" />
-    </list>
+    <list default="true" id="50d94d65-e749-4a1c-9be7-88e5f5b43d9c" name="Changes" comment="" />
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -56,7 +53,7 @@
     "RunOnceActivity.ShowReadmeOnStart": "true",
     "RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager": "true",
     "RunOnceActivity.git.unshallow": "true",
-    "git-widget-placeholder": "backup/pre-merge-20251030T200622Z",
+    "git-widget-placeholder": "feature/performance-optimizations",
     "settings.editor.selected.configurable": "terminal"
   }
 }]]></component>
