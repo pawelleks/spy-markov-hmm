@@ -5,3 +5,4 @@ numpy>=1.26
 matplotlib>=3.8
 scikit-learn>=1.4
 hmmlearn>=0.3.2
+plotly>=5.18
