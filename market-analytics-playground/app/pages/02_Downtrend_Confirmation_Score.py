@@ -49,6 +49,33 @@ def downsample_for_plot(dates: pd.DatetimeIndex, values: pd.Series, max_pts: int
     step = int(np.ceil(n / max_pts))
     return dates[::step], values.iloc[::step]
 
+# Robust field getter for mixed dict key styles (Score vs score vs Score (0-1))
+def get_field(it, keys, default=np.nan):
+    if isinstance(it, dict):
+        for k in keys:
+            if k in it:
+                return it[k]
+    return default
+
+# Small helper to produce status badge text and color for a component score (0..1 or 0..100)
+def status_badge(v):
+    if v is None:
+        return ('NA', NEUTRAL)
+    try:
+        vv = float(v)
+    except Exception:
+        return ('NA', NEUTRAL)
+    # normalize if on 0..100 scale
+    if vv > 1.0:
+        vv = vv / 100.0
+    if np.isnan(vv):
+        return ('NA', NEUTRAL)
+    if vv <= 0.33:
+        return ('OK', '#1e7f54')
+    if vv <= 0.66:
+        return ('CAUTION', '#b08b00')
+    return ('RISK', '#b33a3a')
+
 # Build Plotly figure for downtrend score
 def build_downtrend_plotly(dates, score_raw, score_smooth, warn, alert, crisis, show_raw=True):
     # Colors and style
@@ -470,9 +497,8 @@ with c2:
 with c3:
     st.caption(f"Window: {start.isoformat()} → {end.isoformat()}")
 
-# Component table for latest date
+# Component table for latest date (clean, robust implementation)
 comp_table = []
-# Human-friendly names for signals
 human_names = {
     "price_lt_ema50": "Price < EMA(50)",
     "ema20_lt_ema50": "EMA(20) < EMA(50)",
@@ -485,530 +511,125 @@ human_names = {
     "hmm_bear_prob": "HMM: Bear probability"
 }
 
+# Build comp_table from current latest index (if available)
 if len(last_idx):
     i = last
     total_weight = 0.0
     total_contrib = 0.0
     for j, name in enumerate(comp_names):
         rawv = sig_vals[i, j]
-        sc = np.nan if np.isnan(rawv) else float(rawv)
-        w = float(W[i, j])
-        contrib = np.nan if np.isnan(rawv) else sc * w
-        total_weight += w
-        total_contrib += 0.0 if np.isnan(contrib) else contrib
+        score_val = np.nan if np.isnan(rawv) else float(rawv)
+        weight_val = float(W[i, j])
+        contrib_val = np.nan if np.isnan(rawv) else (float(rawv) * weight_val)
+        total_weight += weight_val
+        total_contrib += 0.0 if np.isnan(contrib_val) else contrib_val
         comp_table.append({
-            "Signal": human_names.get(name, name),
-            "Value/raw": ("NA" if np.isnan(rawv) else f"{sc:.2f}"),
-            "Score (0-1)": ("NA" if np.isnan(rawv) else f"{sc:.2f}"),
-            "Weight": f"{w:.2f}",
-            "Weighted contribution": ("NA" if np.isnan(contrib) else f"{contrib:.2f}")
+            'internal': name,
+            'Signal': human_names.get(name, name),
+            'Category': {
+                'price_lt_ema50':'Trend','ema20_lt_ema50':'Trend','mom21_lt_0':'Trend',
+                'atr_gt_sma63':'Volatility','rv20_gt_rv63':'Volatility',
+                'vix_term_pos':'Market Structure','rsp_spy_63_neg':'Breadth',
+                'hyg_lqd_21_neg':'Credit','hmm_bear_prob':'State Models'
+            }.get(name,'Misc'),
+            'Value/raw': ('NA' if np.isnan(rawv) else f"{score_val:.2f}"),
+            'Score': (np.nan if np.isnan(score_val) else score_val),
+            'Weight': weight_val,
+            'Weighted contribution': (np.nan if np.isnan(contrib_val) else contrib_val)
         })
-    # Append a totals row (SUM) showing total weight and total weighted contribution
-    comp_table.append({
-        "Signal": "SUM",
-        "Value/raw": "",
-        "Score (0-1)": "",
-        "Weight": f"{total_weight:.2f}",
-        "Weighted contribution": f"{total_contrib:.2f}"
-    })
-    df_comp_table = pd.DataFrame(comp_table)
-
-    # --- Enhanced UI for Component contributions (presentation only) ---
-    # User controls
-    st.sidebar.markdown("")
-    show_explanations = st.sidebar.checkbox("Show explanations", value=True, key="dcs_show_explanations")
-    show_sparklines = st.sidebar.checkbox("Show sparklines", value=False, key="dcs_show_sparklines")
-    group_by_category = st.sidebar.checkbox("Group by category", value=True, key="dcs_group_by_category")
-    # compact / view controls (define early so rendering below can reference them)
-    compact_mode = st.sidebar.checkbox("Compact mode (recommended)", value=True, key="dcs_compact_mode")
-    show_sparklines_compact = st.sidebar.checkbox("Show sparklines (compact)", value=False, key="dcs_show_sparklines_compact")
-    # effective sparklines flag used in rendering
-    try:
-        show_sparklines_effective = show_sparklines or show_sparklines_compact
-    except NameError:
-        show_sparklines_effective = show_sparklines_compact
-    view_mode = st.sidebar.radio("View", ["Grid", "Table (dense)"], index=0, key="dcs_view_mode")
-
-    # Category mapping
-    category_map = {
-        "price_lt_ema50": "Trend",
-        "ema20_lt_ema50": "Trend",
-        "mom21_lt_0": "Trend",
-        "atr_gt_sma63": "Volatility",
-        "rv20_gt_rv63": "Volatility",
-        "vix_term_pos": "Market Structure",
-        "rsp_spy_63_neg": "Breadth",
-        "hyg_lqd_21_neg": "Credit",
-        "hmm_bear_prob": "State Models"
-    }
-
-    # Explanations
-    explanations = {
-        "Price < EMA(50)": "Price trading below its 50-day EMA — bearish trend.",
-        "EMA(20) < EMA(50)": "Short-term EMA below medium-term EMA — trend weakness.",
-        "21-day Momentum < 0": "Negative 21-day price change — downward momentum.",
-        "ATR(14)/Price > 63-day SMA": "Rising ATR relative to its SMA — volatility pickup.",
-        "Realized Vol (20d) > (63d)": "Short-term realized vol higher than longer-term — expanding variance.",
-        "VIX − VIX3M > 0 (term)": "Positive VIX term slope — near-term volatility premium.",
-        "RSP/SPY 63d return < 0 (breadth)": "Equal-weight underperforming cap-weighted — weak breadth.",
-        "HYG/LQD 21d return < 0 (credit)": "High-yield underperforms investment-grade — credit stress.",
-        "HMM: Bear probability": "Model-estimated probability of a bear regime (0-1)."
-    }
-
-    # helpers: color interpolation
-    def hex_to_rgb(h):
-        h = h.lstrip('#')
-        return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
-    def rgb_to_hex(r, g, b):
-        return f'#{int(r):02x}{int(g):02x}{int(b):02x}'
-    green = hex_to_rgb('1e7f54')
-    amber = hex_to_rgb('b08b00')
-    redc = hex_to_rgb('b33a3a')
-
-    def interp_color(v):
-        # v between 0..1 -> interpolate green->amber->red
-        if np.isnan(v):
-            return 'transparent'
-        v = float(np.clip(v, 0.0, 1.0))
-        if v <= 0.5:
-            t = v / 0.5
-            r = green[0] + (amber[0]-green[0]) * t
-            g = green[1] + (amber[1]-green[1]) * t
-            b = green[2] + (amber[2]-green[2]) * t
-        else:
-            t = (v-0.5)/0.5
-            r = amber[0] + (redc[0]-amber[0]) * t
-            g = amber[1] + (redc[1]-amber[1]) * t
-            b = amber[2] + (redc[2]-amber[2]) * t
-        # return rgba with some alpha suited for dark bg
-        return f'rgba({int(r)},{int(g)},{int(b)},0.18)'
-
-    # status badge
-    def status_badge(v):
-        if np.isnan(v):
-            return ('NA', NEUTRAL)
-        if v <= 0.33:
-            return ('OK', '#1e7f54')
-        if v <= 0.66:
-            return ('CAUTION', '#b08b00')
-        return ('RISK', '#b33a3a')
-
-    # Sparkline generator
-    import io, base64
-    def make_sparkline(series: pd.Series, color='#00d4ff', width=120, height=32):
-        fig, ax = plt.subplots(figsize=(width/100, height/100), dpi=100)
-        fig.patch.set_facecolor(DARK_BG)
-        ax.set_facecolor(DARK_BG)
-        ax.plot(series.index, series.values, color=color, linewidth=1.2)
-        ax.fill_between(series.index, series.values, alpha=0.04, color=color)
-        ax.axis('off')
-        plt.margins(x=0)
-        buf = io.BytesIO()
-        plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0)
-        plt.close(fig)
-        buf.seek(0)
-        return buf
-
-    # Build a structured list with category and optional sparkline series
-    rows = []
-    # map internal keys to underlying series for sparklines
-    for r in comp_table[:-1]:  # exclude SUM here
-        key = None
-        # try to find the component key by matching human name to internal map
-        # reverse map
-        rev = {v:k for k,v in human_names.items()}
-        internal = rev.get(r['Signal'], None)
-        if internal is None:
-            # fallback: try exact matches
-            for k in comp_names:
-                if human_names.get(k,'') == r['Signal']:
-                    internal = k; break
-        cat = category_map.get(internal, 'Misc')
-        # base series selection
-        spark_series = None
-        try:
-            if internal in ['price_lt_ema50', 'ema20_lt_ema50']:
-                spark_series = (signals[internal].astype(float)).fillna(0).iloc[-60:]
-            elif internal == 'mom21_lt_0':
-                # momentum scaled 0..1
-                tmp = mom21.copy().astype('float')
-                tmp = (tmp - tmp.rolling(252, min_periods=1).min()) / (tmp.rolling(252, min_periods=1).max() - tmp.rolling(252, min_periods=1).min() + 1e-9)
-                spark_series = tmp.iloc[-60:].fillna(0)
-            elif internal == 'atr_gt_sma63':
-                tmp = (atr14 / spy_price) / (atr63 / spy_price.replace(0, np.nan) + 1e-9)
-                spark_series = tmp.iloc[-60:].replace([np.inf,-np.inf],np.nan).fillna(method='ffill').fillna(0)
-            elif internal == 'rv20_gt_rv63':
-                tmp = (rv20 / (rv63 + 1e-9))
-                spark_series = tmp.iloc[-60:].replace([np.inf,-np.inf],np.nan).fillna(method='ffill').fillna(0)
-            elif internal == 'vix_term_pos':
-                tmp = term_diff.fillna(0)
-                # scale to 0..1 by percentile
-                spark_series = ((tmp - tmp.min()) / (tmp.max()-tmp.min()+1e-9)).iloc[-60:].fillna(0)
-            elif internal == 'rsp_spy_63_neg':
-                tmp = ratio_return63.fillna(0)
-                # negative returns -> positive signal; scale abs(return)
-                spark_series = ((-tmp).clip(lower=0)).iloc[-60:].fillna(0)
-            elif internal == 'hyg_lqd_21_neg':
-                tmp = credit_ratio21.fillna(0)
-                spark_series = ((-tmp).clip(lower=0)).iloc[-60:].fillna(0)
-            elif internal == 'hmm_bear_prob' and hmm_bear is not None:
-                spark_series = hmm_bear.iloc[-60:].fillna(0)
-        except Exception:
-            spark_series = None
-
-        rows.append({
-            'internal': internal,
-            'Signal': r['Signal'],
-            'Category': cat,
-            'Value/raw': r['Value/raw'],
-            'Score': (np.nan if r['Score (0-1)']=="NA" else float(r['Score (0-1)'])),
-            'Weight': float(r['Weight']) if r['Weight']!='' else 0.0,
-            'Contribution': (np.nan if r['Weighted contribution']=="NA" or r['Weighted contribution']=='' else float(r['Weighted contribution'])),
-            'spark': spark_series
-        })
-
-    # Compute model confidence
-    available = [rr for rr in rows if not (rr['Score'] is np.nan)]
-    active_count = sum(1 for rr in available if rr['Score'] is not None and rr['Score'] >= 0.5)
-    total_available = len([rr for rr in rows if rr['Score'] is not np.nan])
-    if active_count <= 2:
-        conf = ('Low', GREEN)
-    elif active_count <= 5:
-        conf = ('Medium', '#b08b00')
-    else:
-        conf = ('High', RED)
-
-    # Model confidence box
-    col1, col2, col3 = st.columns([1,1,3])
-    with col1:
-        st.markdown(f"**Model confidence:** <span style='color:{conf[1]}'>{conf[0]}</span>", unsafe_allow_html=True)
-    with col2:
-        st.markdown(f"**Active bearish signals:** <span style='color:{FG}'>{active_count} / {len([r for r in rows if r['Score'] is not np.nan])}</span>", unsafe_allow_html=True)
-    with col3:
-        st.caption("Signals with Score ≥ 0.5 counted as active bearish signals.")
-
-    # Render table: grouped or flat
-    def render_row(rr):
-        # create columns: Signal | Sparkline | Value | Score | Weight | Contribution | Status
-        cols = st.columns([2, 1, 1, 1, 1, 1, 1])
-        # Signal + explanation
-        with cols[0]:
-            st.markdown(f"**{rr['Signal']}**")
-            if show_explanations:
-                expl = explanations.get(rr['Signal'], '')
-                if expl:
-                    st.caption(expl)
-        # sparkline
-        with cols[1]:
-            if show_sparklines and rr['spark'] is not None and len(rr['spark']):
-                buf = make_sparkline(rr['spark'])
-                st.image(buf, use_column_width=True)
-        # Value
-        with cols[2]:
-            st.markdown(f"<div style='text-align:right;color:{FG};font-size:12px'>{rr['Value/raw']}</div>", unsafe_allow_html=True)
-        # Score with heatmap background
-        score_bg = interp_color(rr['Score'] if rr['Score'] is not None else np.nan)
-        with cols[3]:
-            val = 'NA' if rr['Score'] is np.nan else f"{rr['Score']:.2f}"
-            st.markdown(f"<div style='background:{score_bg};padding:6px;border-radius:4px;text-align:right;color:{FG};font-size:12px'>{val}</div>", unsafe_allow_html=True)
-        # Weight
-        with cols[4]:
-            st.markdown(f"<div style='text-align:right;color:{FG};font-size:12px'>{rr['Weight']:.2f}</div>", unsafe_allow_html=True)
-        # Contribution with heatmap
-        contrib_bg = interp_color((rr['Contribution'] - 0.0) if rr['Contribution'] is not np.nan else np.nan)
-        with cols[5]:
-            val = 'NA' if rr['Contribution'] is np.nan else f"{rr['Contribution']:.2f}"
-            st.markdown(f"<div style='background:{contrib_bg};padding:6px;border-radius:4px;text-align:right;color:{FG};font-size:12px'>{val}</div>", unsafe_allow_html=True)
-        # Status badge
-        stat, color = status_badge(rr['Score'] if rr['Score'] is not None else np.nan)
-        with cols[6]:
-            st.markdown(f"<div style='background:{color};color:{DARK_BG};padding:6px;border-radius:4px;text-align:center;font-weight:bold'>{stat}</div>", unsafe_allow_html=True)
-
-    if group_by_category:
-        # group by category
-        grouped = {}
-        for rr in rows:
-            grouped.setdefault(rr['Category'], []).append(rr)
-        for cat, items in grouped.items():
-            # compact_mode: render inline dense grid (no expander) to save vertical space
-            # robustly handle items that may use 'score' or 'Score' keys and 'weight' or 'Weight'
-            def _get_num(it, keys):
-                for k in keys:
-                    if isinstance(it, dict) and k in it:
-                        try:
-                            v = it[k]
-                            return float(v) if v is not None and (not (isinstance(v, str) and v.strip()=='')) else np.nan
-                        except Exception:
-                            return np.nan
-            def get_field(it, keys, default=''):
-                for k in keys:
-                    if isinstance(it, dict) and k in it:
-                        return it[k]
-                return default
-
-            active_count = sum(1 for it in items if not np.isnan(_get_num(it, ('score','Score'))) and _get_num(it, ('score','Score'))>=0.5)
-            weight_sum = sum((_get_num(it, ('weight','Weight')) if not np.isnan(_get_num(it, ('weight','Weight'))) else 0.0) for it in items)
-            cat_title = f"{cat} — {active_count}/{len(items)} bearish • sum(w)={weight_sum:.2f}"
-            if compact_mode:
-                # small header
-                st.markdown(f"<div style='margin-top:6px;margin-bottom:4px;color:{FG};font-size:13px;font-weight:600'>{cat_title}</div>", unsafe_allow_html=True)
-                # render tight grid: choose up to 4 cols to minimize rows
-                ncols = 4
-                chunks = [items[i:i+ncols] for i in range(0, len(items), ncols)]
-                for chunk in chunks:
-                    cols = st.columns(ncols, gap='small')
-                    for col, it in zip(cols, chunk):
-                        with col:
-                            # compact card: one-line title, tiny spark, thin bar, weight+status on same line
-                            title = get_field(it, ('signal','Signal'))
-                            tooltip = explanations.get(title, '') if 'explanations' in locals() else ''
-                            # sparkline (very small)
-                            if show_sparklines_effective and it['spark'] is not None:
-                                try:
-                                    buf = make_sparkline(it['spark'], width=60, height=22)
-                                    st.image(buf, use_column_width=True)
-                                except Exception:
-                                    pass
-                            # compact HTML card
-                            pct = 0 if np.isnan(it['Score']) else it['Score']
-                            pct_norm = np.clip(pct/100.0 if pct>1 else pct, 0, 1)
-                            stat_txt, stat_col = status_badge(get_field(it, ('Score','score'), np.nan) if not np.isnan(get_field(it, ('Score','score'), np.nan)) else np.nan)
-                            card_html = (
-                                f"<div class='mini-card' style='height:56px;overflow:hidden;'>"
-                                f"<div class='title' title='{tooltip}' style='font-size:12px;margin-bottom:4px'>{title}</div>"
-                                f"<div class='mini-bar'><div class='fill' style='width:{pct_norm*100:.1f}%'></div></div>"
-                                f"<div style='display:flex;justify-content:space-between;align-items:center;margin-top:6px;font-size:11px;color:{FG}'>"
-                                f"<span style='opacity:0.9'>w={it['Weight']:.2f}</span>"
-                                f"<span style='background:{stat_col};color:{DARK_BG};padding:2px 6px;border-radius:4px;font-weight:700'>{stat_txt}</span>"
-                                f"</div></div>"
-                            )
-                            st.markdown(card_html, unsafe_allow_html=True)
-            else:
-                # non-compact: keep expanders (less dense, more details)
-                expanded_default = not compact_mode
-                with st.expander(cat_title, expanded=expanded_default):
-                    ncols = 3
-                    chunks = [items[i:i+ncols] for i in range(0, len(items), ncols)]
-                    for chunk in chunks:
-                        cols = st.columns(ncols, gap='small')
-                        for col, it in zip(cols, chunk):
-                            with col:
-                                score_pct = 0.0 if np.isnan(it['score']) else it['score']
-                                stat_txt, stat_col = status_badge(it['score'] if not np.isnan(it['score']) else np.nan)
-                                title = it['signal']
-                                tooltip = explanations.get(it['signal'], '') if 'explanations' in locals() else ''
-                                if show_sparklines_effective and it['spark'] is not None:
-                                    try:
-                                        buf = make_sparkline(it['spark'], width=80, height=28)
-                                        st.image(buf, use_column_width=True)
-                                    except Exception:
-                                        pass
-                                st.markdown(f"<div class='mini-card'><div class='title' title='{tooltip}'>{title}</div>", unsafe_allow_html=True)
-                                pct = 0 if np.isnan(score_pct) else score_pct
-                                pct_norm = np.clip(pct/100.0 if pct>1 else pct, 0, 1)
-                                bar_html = f"<div class='mini-bar'><div class='fill' style='width:{pct_norm*100:.1f}%'></div></div>"
-                                st.markdown(bar_html, unsafe_allow_html=True)
-                                st.markdown(f"<div class='meta' style='display:flex;justify-content:space-between;align-items:center;margin-top:4px'><span>w={it['weight']:.2f}</span><span style='color:{FG}'>{'NA' if np.isnan(it['score']) else f'{it['score']:.2f}'}</span></div></div>", unsafe_allow_html=True)
-    else:
-        # flat list
-        for rr in rows:
-            render_row(rr)
-
-    # Totals row (SUM) rendered at bottom
-    st.markdown("---")
-    st.markdown(f"**Totals — Weight:** {total_weight:.2f} — **Weighted contribution:** {total_contrib:.2f}")
-
-    # --- Compact & Dense UI (grid of mini-cards + dense table view) ---
-    # Sidebar controls were defined earlier above; reuse them here.
-    st.sidebar.caption("Compact mode reduces padding, font sizes, and uses a grid of mini-cards for faster scanning.")
-    # view_mode is declared earlier; do not redeclare to avoid duplicate widget keys
-
-    # Build rows (simple representation)
-    rows = []
-    rev = {v: k for k, v in human_names.items()}
-    for r in comp_table[:-1]:
-        internal = rev.get(r['Signal'])
-        if internal is None:
-            for k in comp_names:
-                if human_names.get(k, '') == r['Signal']:
-                    internal = k; break
-        cat = category_map.get(internal, 'Misc')
-        score_val = (np.nan if r['Score (0-1)'] == 'NA' else float(r['Score (0-1)']))
-        weight_val = (0.0 if r['Weight'] == '' else float(r['Weight']))
-        contrib_val = (np.nan if r['Weighted contribution'] in ("NA", "") else float(r['Weighted contribution']))
-        # try to build small spark series
-        spark_series = None
-        try:
-            if internal in ['price_lt_ema50', 'ema20_lt_ema50']:
-                spark_series = signals[internal].fillna(0).iloc[-40:]
-            elif internal == 'mom21_lt_0':
-                tmp = mom21.copy().astype(float)
-                tmp = (tmp - tmp.rolling(252, min_periods=1).min()) / (tmp.rolling(252, min_periods=1).max() - tmp.rolling(252, min_periods=1).min() + 1e-9)
-                spark_series = tmp.iloc[-40:].fillna(0)
-            elif internal == 'atr_gt_sma63':
-                tmp = (atr14 / spy_price) / (atr63 / spy_price.replace(0, np.nan) + 1e-9)
-                spark_series = tmp.iloc[-40:].replace([np.inf, -np.inf], np.nan).fillna(method='ffill').fillna(0)
-            elif internal == 'rv20_gt_rv63':
-                tmp = (rv20 / (rv63 + 1e-9))
-                spark_series = tmp.iloc[-40:].replace([np.inf, -np.inf], np.nan).fillna(method='ffill').fillna(0)
-            elif internal == 'vix_term_pos' and term_diff is not None:
-                tmp = term_diff.fillna(0)
-                spark_series = ((tmp - tmp.min()) / (tmp.max() - tmp.min() + 1e-9)).iloc[-40:].fillna(0)
-            elif internal == 'rsp_spy_63_neg' and ratio_return63 is not None:
-                tmp = ratio_return63.fillna(0); spark_series = ((-tmp).clip(lower=0)).iloc[-40:].fillna(0)
-            elif internal == 'hyg_lqd_21_neg' and credit_ratio21 is not None:
-                tmp = credit_ratio21.fillna(0); spark_series = ((-tmp).clip(lower=0)).iloc[-40:].fillna(0)
-            elif internal == 'hmm_bear_prob' and hmm_bear is not None:
-                spark_series = hmm_bear.iloc[-40:].fillna(0)
-        except Exception:
-            spark_series = None
-
-        rows.append({
-            'internal': internal,
-            'signal': r['Signal'],
-            'category': cat,
-            'score': score_val,
-            'weight': weight_val,
-            'contrib': contrib_val,
-            'spark': spark_series,
-            'raw': r['Value/raw']
-        })
-
-    # summarise
-    available = [rr for rr in rows if not np.isnan(rr['score'])]
-    active_count = sum(1 for rr in available if rr['score'] >= 0.5)
-    total_available = len(available)
-    if active_count <= 2:
-        conf_txt, conf_col = ('Low', GREEN)
-    elif active_count <= 5:
-        conf_txt, conf_col = ('Medium', '#b08b00')
-    else:
-        conf_txt, conf_col = ('High', RED)
-
-    # top summary strip (single line)
-    s1, s2, s3 = st.columns([1, 1, 1])
-    s1.markdown(f"**Confidence:** <span style='color:{conf_col}'>{conf_txt}</span>", unsafe_allow_html=True)
-    s2.markdown(f"**Active bearish signals:** <span style='color:{FG}'>{active_count} / {total_available}</span>", unsafe_allow_html=True)
-    score_display = f"{current_score:.1f}" if not np.isnan(current_score) else "N/A"
-    s3.markdown(f"**Score:** <span style='color:{FG}'>{score_display}</span>", unsafe_allow_html=True)
-
-    # compact CSS: denser mini-cards and tighter expanders for single-screen fit
-    if compact_mode:
-        st.markdown("""
-        <style>
-        /* Mini-cards: reduced padding & margin, smaller fonts */
-        .mini-card { background: #0f1724; padding:4px; border-radius:6px; margin:2px; }
-        .mini-card .title { font-size:11px; color: #d7e3f3; font-weight:600; line-height:1; }
-        .mini-card .meta { font-size:10px; color: #bfcddb; }
-        .mini-bar { height:8px; background:#0f1a28; border-radius:6px; margin-top:6px }
-        .mini-bar .fill { height:100%; background: linear-gradient(90deg, rgba(158,196,255,1), rgba(0,200,255,0.6)); border-radius:6px; }
-        /* Tighter expander summary and caption */
-        .streamlit-expanderHeader { padding: 4px 8px; }
-        /* Reduce padding inside st.columns content */
-        .css-1lcbmhc.e1fqkh3o { padding: 2px 4px !important; }
-        </style>
-        """, unsafe_allow_html=True)
-
-    if view_mode == 'Table (dense)':
-        df_table = pd.DataFrame([{
-            'Signal': r['signal'],
-            'Score': (np.nan if np.isnan(r['score']) else round(r['score'],2)),
-            'Weight': round(r['weight'],2),
-            'Contribution': (np.nan if np.isnan(r['contrib']) else round(r['contrib'],2)),
-            'Status': status_badge(r['score'])[0]
-        } for r in rows])
-        # style and render
-        # Inject dense table CSS so rows are compact and fit on one screen
-        st.markdown("""
-        <style>
-        /* Target st.dataframe table cells */
-        [data-testid="stDataFrame"] table {
-            font-size:12px;
-        }
-        [data-testid="stDataFrame"] th, [data-testid="stDataFrame"] td {
-            padding: 4px 6px !important;
-            line-height: 1.1 !important;
-        }
-        /* Reduce widget container padding that can add vertical space */
-        .css-1v0mbdj.e1tzin5v { padding: 4px 8px !important; }
-        </style>
-        """, unsafe_allow_html=True)
-
-        st.dataframe(df_table.style.hide_index().format({'Score':'{:.2f}','Weight':'{:.2f}','Contribution':'{:.2f}'}), use_container_width=True, height=min(520, 32 + 26 * len(df_table)))
-    else:
-        # Grid mode
-        grouped = {}
-        for rr in rows:
-            grouped.setdefault(rr['category'], []).append(rr)
-        for cat, items in grouped.items():
-            # compact_mode: render inline dense grid (no expander) to save vertical space
-            cat_title = f"{cat} — {sum(1 for it in items if not np.isnan(it['score']) and it['score']>=0.5)}/{len(items)} bearish • sum(w)={sum(it['weight'] for it in items if not np.isnan(it['weight'])):.2f}"
-            if compact_mode:
-                # small header
-                st.markdown(f"<div style='margin-top:6px;margin-bottom:4px;color:{FG};font-size:13px;font-weight:600'>{cat_title}</div>", unsafe_allow_html=True)
-                # render tight grid: choose up to 4 cols to minimize rows
-                ncols = 4
-                chunks = [items[i:i+ncols] for i in range(0, len(items), ncols)]
-                for chunk in chunks:
-                    cols = st.columns(ncols, gap='small')
-                    for col, it in zip(cols, chunk):
-                        with col:
-                            # compact card: one-line title, tiny spark, thin bar, weight+status on same line
-                            title = get_field(it, ('signal','Signal'))
-                            tooltip = explanations.get(title, '') if 'explanations' in locals() else ''
-                            # sparkline (very small)
-                            if show_sparklines_effective and it['spark'] is not None:
-                                try:
-                                    buf = make_sparkline(it['spark'], width=60, height=22)
-                                    st.image(buf, use_column_width=True)
-                                except Exception:
-                                    pass
-                            # compact HTML card
-                            pct = 0 if np.isnan(it['Score']) else it['Score']
-                            pct_norm = np.clip(pct/100.0 if pct>1 else pct, 0, 1)
-                            stat_txt, stat_col = status_badge(get_field(it, ('Score','score'), np.nan) if not np.isnan(get_field(it, ('Score','score'), np.nan)) else np.nan)
-                            card_html = (
-                                f"<div class='mini-card' style='height:56px;overflow:hidden;'>"
-                                f"<div class='title' title='{tooltip}' style='font-size:12px;margin-bottom:4px'>{title}</div>"
-                                f"<div class='mini-bar'><div class='fill' style='width:{pct_norm*100:.1f}%'></div></div>"
-                                f"<div style='display:flex;justify-content:space-between;align-items:center;margin-top:6px;font-size:11px;color:{FG}'>"
-                                f"<span style='opacity:0.9'>w={it['Weight']:.2f}</span>"
-                                f"<span style='background:{stat_col};color:{DARK_BG};padding:2px 6px;border-radius:4px;font-weight:700'>{stat_txt}</span>"
-                                f"</div></div>"
-                            )
-                            st.markdown(card_html, unsafe_allow_html=True)
-            else:
-                # non-compact: keep expanders (less dense, more details)
-                expanded_default = not compact_mode
-                with st.expander(cat_title, expanded=expanded_default):
-                    ncols = 3
-                    chunks = [items[i:i+ncols] for i in range(0, len(items), ncols)]
-                    for chunk in chunks:
-                        cols = st.columns(ncols, gap='small')
-                        for col, it in zip(cols, chunk):
-                            with col:
-                                score_pct = 0.0 if np.isnan(it['score']) else it['score']
-                                stat_txt, stat_col = status_badge(it['score'] if not np.isnan(it['score']) else np.nan)
-                                title = it['signal']
-                                tooltip = explanations.get(it['signal'], '') if 'explanations' in locals() else ''
-                                if show_sparklines_effective and it['spark'] is not None:
-                                    try:
-                                        buf = make_sparkline(it['spark'], width=80, height=28)
-                                        st.image(buf, use_column_width=True)
-                                    except Exception:
-                                        pass
-                                st.markdown(f"<div class='mini-card'><div class='title' title='{tooltip}'>{title}</div>", unsafe_allow_html=True)
-                                pct = 0 if np.isnan(score_pct) else score_pct
-                                pct_norm = np.clip(pct/100.0 if pct>1 else pct, 0, 1)
-                                bar_html = f"<div class='mini-bar'><div class='fill' style='width:{pct_norm*100:.1f}%'></div></div>"
-                                st.markdown(bar_html, unsafe_allow_html=True)
-                                st.markdown(f"<div class='meta' style='display:flex;justify-content:space-between;align-items:center;margin-top:4px'><span>w={it['weight']:.2f}</span><span style='color:{FG}'>{'NA' if np.isnan(it['score']) else f'{it['score']:.2f}'}</span></div></div>", unsafe_allow_html=True)
-    # End of compact/table rendering
+    # totals row
+    comp_table.append({'internal':'sum','Signal':'SUM','Category':'','Value/raw':'','Score':'','Weight':total_weight,'Weighted contribution':total_contrib})
 
 else:
     st.info("No valid scores available for the selected window.")
 
-# Charts
+# Create a DataFrame copy for optional table rendering
+df_comp_table = pd.DataFrame(comp_table)
+
+# UI controls (single definition of each widget key)
+show_explanations = st.sidebar.checkbox("Show explanations", value=True, key="dcs_show_explanations")
+show_sparklines = st.sidebar.checkbox("Show sparklines", value=False, key="dcs_show_sparklines")
+group_by_category = st.sidebar.checkbox("Group by category", value=True, key="dcs_group_by_category")
+compact_mode = st.sidebar.checkbox("Compact mode (recommended)", value=True, key="dcs_compact_mode")
+view_mode = st.sidebar.radio("View", ["Grid", "Table (dense)"], index=0, key="dcs_view_mode")
+
+# small helpers for rendering
+def make_comp_rows(comp_table):
+    rows = []
+    for it in comp_table:
+        rows.append({
+            'internal': it.get('internal',''),
+            'signal': it.get('Signal',''),
+            'category': it.get('Category',''),
+            'score': (np.nan if it.get('Score')=='' else (np.nan if it.get('Score') is None else float(it.get('Score')))),
+            'weight': float(it.get('Weight') or 0.0),
+            'contrib': (np.nan if it.get('Weighted contribution')=='' else (np.nan if it.get('Weighted contribution') is None else float(it.get('Weighted contribution')))),
+            'raw': it.get('Value/raw','')
+        })
+    return rows
+
+rows = make_comp_rows(comp_table[:-1]) if len(comp_table)>0 else []
+
+# Model confidence summary
+available = [r for r in rows if not np.isnan(r['score'])]
+active_count = sum(1 for r in available if r['score'] >= 0.5)
+total_available = len(available)
+if active_count <= 2:
+    conf_txt, conf_col = ('Low', GREEN)
+elif active_count <= 5:
+    conf_txt, conf_col = ('Medium', '#b08b00')
+else:
+    conf_txt, conf_col = ('High', RED)
+
+# Top summary strip
+s1, s2, s3 = st.columns([1,1,1])
+s1.markdown(f"**Confidence:** <span style='color:{conf_col}'>{conf_txt}</span>", unsafe_allow_html=True)
+s2.markdown(f"**Active bearish signals:** <span style='color:{FG}'>{active_count} / {total_available}</span>", unsafe_allow_html=True)
+score_display = f"{current_score:.1f}" if not np.isnan(current_score) else "N/A"
+s3.markdown(f"**Score:** <span style='color:{FG}'>{score_display}</span>", unsafe_allow_html=True)
+
+# Render Table (dense) or Grid
+if view_mode == 'Table (dense)':
+    if rows:
+        df_table = pd.DataFrame(rows)
+        df_table_display = df_table[['signal','score','weight','contrib']].rename(columns={'signal':'Signal','score':'Score','weight':'Weight','contrib':'Contribution'})
+        df_table_display['Score'] = df_table_display['Score'].map(lambda x: 'NA' if np.isnan(x) else f"{x:.2f}")
+        df_table_display['Weight'] = df_table_display['Weight'].map(lambda x: f"{x:.2f}")
+        df_table_display['Contribution'] = df_table_display['Contribution'].map(lambda x: 'NA' if np.isnan(x) else f"{x:.2f}")
+        st.dataframe(df_table_display.style.hide_index(), use_container_width=True, height=min(480, 28+24*len(df_table_display)))
+    else:
+        st.info("No component rows to display.")
+else:
+    # Grid mode (compact cards)
+    if not rows:
+        st.info("No component rows to display.")
+    else:
+        grouped = {}
+        for r in rows:
+            grouped.setdefault(r['category'], []).append(r)
+        for cat, items in grouped.items():
+            st.markdown(f"**{cat} — {sum(1 for it in items if not np.isnan(it['score']) and it['score']>=0.5)}/{len(items)} bearish**")
+            ncols = 4
+            chunks = [items[i:i+ncols] for i in range(0,len(items),ncols)]
+            for chunk in chunks:
+                cols = st.columns(ncols, gap='small')
+                for col, it in zip(cols, chunk):
+                    with col:
+                        st.markdown(f"**{it['signal']}**")
+                        st.caption(it['raw'])
+                        pct = 'NA' if np.isnan(it['score']) else f"{it['score']:.2f}"
+                        st.markdown(f"<div style='text-align:right;color:{FG}'>Score: {pct} • w={it['weight']:.2f}</div>", unsafe_allow_html=True)
+                        stat, colr = status_badge(it['score'] if not np.isnan(it['score']) else np.nan)
+                        st.markdown(f"<div style='background:{colr};color:{DARK_BG};padding:4px;border-radius:4px;text-align:center'>{stat}</div>", unsafe_allow_html=True)
+
+# Totals
+try:
+    st.markdown('---')
+    st.markdown(f"**Totals — Weight:** {sum([r['weight'] for r in rows]):.2f} — **Weighted contribution:** {sum([0.0 if np.isnan(r['contrib']) else r['contrib'] for r in rows]):.2f}")
+except Exception:
+    pass
+
+# --- Charts ---
 st.markdown("---")
 st.markdown("### Downtrend Confirmation Score (Historical)")
 
