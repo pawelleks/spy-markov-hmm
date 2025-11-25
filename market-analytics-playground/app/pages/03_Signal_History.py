@@ -434,8 +434,13 @@ st.markdown(f"Showing rows {start_idx+1}–{end_idx} of {n_rows}")
 # prepare display slice (newest first)
 display = table.iloc[start_idx:end_idx].copy()
 # format signals as check marks
+# format signals as check marks
 for col in signals.columns:
-    display[col] = display[col].map({1: '✅', 0: '❌', np.nan: 'NA'})
+    if col == 'hmm_bear_prob':
+        # Format as percentage for display
+        display[col] = display[col].apply(lambda x: f"{x:.0%}" if pd.notnull(x) else 'NA')
+    else:
+        display[col] = display[col].map({1: '✅', 0: '❌', np.nan: 'NA'})
 
 # color scale for score bands
 def score_color(val):

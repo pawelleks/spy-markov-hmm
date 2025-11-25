@@ -357,23 +357,32 @@ else:
     credit_ratio21 = None
 
 # HMM Bear probability from session state
+# HMM Bear probability from session state
 hmm_bear = None
 hb_raw = st.session_state.get("hmm_bear_prob_series")
 if hb_raw is not None:
+    # 1. Try to interpret as list of dicts (records) -> DataFrame
+    #    Expected format: [{'Date': timestamp, 'Value': float}, ...]
     try:
-        # if hb_raw is list/array same length as df, align by order
-        hb_arr = np.asarray(hb_raw, dtype=float)
-        if len(hb_arr) == len(df):
-            hmm_bear = pd.Series(hb_arr, index=df.index).astype("float32")
-        else:
-            # try to interpret as (date, val) pairs or dict
+        if isinstance(hb_raw, list) and len(hb_raw) > 0 and isinstance(hb_raw[0], dict):
             hb_df = pd.DataFrame(hb_raw)
             if {"Date", "Value"}.issubset(hb_df.columns):
                 hb_df["Date"] = pd.to_datetime(hb_df["Date"]).dt.normalize()
+                # Reindex to match the current page's dataframe dates
+                # Use ffill() to propagate the last known HMM state forward
                 tmp = hb_df.set_index("Date")["Value"].reindex(df["Date"]).ffill()
                 hmm_bear = tmp.astype("float32")
     except Exception:
-        hmm_bear = None
+        pass
+
+    # 2. If that failed or wasn't a dict list, try as simple array aligned by position
+    if hmm_bear is None:
+        try:
+            hb_arr = np.asarray(hb_raw, dtype=float)
+            if len(hb_arr) == len(df):
+                hmm_bear = pd.Series(hb_arr, index=df.index).astype("float32")
+        except Exception:
+            hmm_bear = None
 
 # --- Signals (0/1 or NA) ---
 signals = pd.DataFrame(index=df.index)

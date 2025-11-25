@@ -614,6 +614,22 @@ if use_hmm and HMM_OK:
         post_full_h.index = feats_full_dates
         regime_full = post_full_h.idxmax(axis=1)
 
+        # Save Bear probability to session state for other pages (e.g. Downtrend Score)
+        if "Bear" in post_full_h.columns:
+            # Create a lightweight list of dicts: [{'Date': ..., 'Value': ...}]
+            # This allows other pages to align by date even if their windows differ.
+            bear_series = post_full_h["Bear"]
+            # Ensure we have the dates as a column
+            export_df = pd.DataFrame({
+                "Date": bear_series.index,
+                "Value": bear_series.values
+            })
+            # Convert to records (list of dicts) to store in session_state
+            # We convert Date to string or keep as Timestamp? 
+            # The receiving page does: pd.to_datetime(hb_df["Date"]) so Timestamp is fine, or string.
+            # Let's use the native types (Timestamp) which pandas handles well.
+            st.session_state["hmm_bear_prob_series"] = export_df.to_dict("records")
+
         st.markdown("### SPY Price with HMM-Detected Regimes — Full History")
         fig, ax = styled_fig((11, 3.8))
         ax.plot(feats_full["Date"], feats_full["Price"], color=LINE, linewidth=1.2)
