@@ -240,6 +240,7 @@ def compute_signals(df: pd.DataFrame, extras: dict) -> pd.DataFrame:
             if ser.empty:
                 return None
             return ser
+        return None
         # If it's a Series
         if isinstance(s, pd.Series):
             ser = s.copy()
@@ -252,17 +253,9 @@ def compute_signals(df: pd.DataFrame, extras: dict) -> pd.DataFrame:
             # Normalize index to ensure alignment with df['Date']
             ser.index = pd.to_datetime(ser.index).normalize()
             if ser.empty:
-                st.sidebar.text(f"DEBUG: {key} Series became empty after cleaning")
                 return None
             return ser
-        st.sidebar.text(f"DEBUG: {key} is not Series/DataFrame? {type(s)}")
         return None
-
-    # Debug: Check what _get_price_series returns
-    for k in ['^VIX', '^VIX3M', 'RSP', 'HYG', 'LQD']:
-        res = _get_price_series(k)
-        status = "FOUND" if res is not None else "MISSING"
-        st.sidebar.text(f"DEBUG: get({k}) -> {status}")
 
 
     # Basic required series on df
@@ -429,11 +422,7 @@ with st.spinner('Loading SPY and extras...'):
                 # drop NaNs
                 ser = ser[~ser.index.isna()].astype('float32')
                 extras[key] = ser
-    
-    # Debug: show what we loaded
-    st.sidebar.markdown("### Debug: Loaded Extras")
-    for k, v in extras.items():
-        st.sidebar.text(f"{k}: {len(v)} rows")
+
 
 
 if spy.empty:
