@@ -248,9 +248,18 @@ def compute_signals(df: pd.DataFrame, extras: dict) -> pd.DataFrame:
                     pass
             ser = ser[~ser.index.isna()]
             if ser.empty:
+                st.sidebar.text(f"DEBUG: {key} Series became empty after cleaning")
                 return None
             return ser
+        st.sidebar.text(f"DEBUG: {key} is not Series/DataFrame? {type(s)}")
         return None
+
+    # Debug: Check what _get_price_series returns
+    for k in ['^VIX', '^VIX3M', 'RSP', 'HYG', 'LQD']:
+        res = _get_price_series(k)
+        status = "FOUND" if res is not None else "MISSING"
+        st.sidebar.text(f"DEBUG: get({k}) -> {status}")
+
 
     # Basic required series on df
     if 'Price' not in df.columns:
