@@ -235,6 +235,8 @@ def compute_signals(df: pd.DataFrame, extras: dict) -> pd.DataFrame:
                     pass
             # drop NaT in index
             ser = ser[~ser.index.isna()]
+            # Normalize index to ensure alignment with df['Date']
+            ser.index = pd.to_datetime(ser.index).normalize()
             if ser.empty:
                 return None
             return ser
@@ -247,6 +249,8 @@ def compute_signals(df: pd.DataFrame, extras: dict) -> pd.DataFrame:
                 except Exception:
                     pass
             ser = ser[~ser.index.isna()]
+            # Normalize index to ensure alignment with df['Date']
+            ser.index = pd.to_datetime(ser.index).normalize()
             if ser.empty:
                 st.sidebar.text(f"DEBUG: {key} Series became empty after cleaning")
                 return None
