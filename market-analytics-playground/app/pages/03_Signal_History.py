@@ -407,6 +407,12 @@ with st.spinner('Loading SPY and extras...'):
                 # drop NaNs
                 ser = ser[~ser.index.isna()].astype('float32')
                 extras[key] = ser
+    
+    # Debug: show what we loaded
+    st.sidebar.markdown("### Debug: Loaded Extras")
+    for k, v in extras.items():
+        st.sidebar.text(f"{k}: {len(v)} rows")
+
 
 if spy.empty:
     st.error('No SPY data for selected window.')
