@@ -312,7 +312,7 @@ def compute_signals(df: pd.DataFrame, extras: dict) -> pd.DataFrame:
         # align to df dates
         idx = pd.to_datetime(df['Date'])
         term = vix_ser.reindex(idx).ffill(limit=1) - vix3m_ser.reindex(idx).ffill(limit=1)
-        out['vix_term_pos'] = (term > 0).astype(float)
+        out['vix_term_pos'] = (term > 0).values.astype(float)
     else:
         out['vix_term_pos'] = np.nan
 
@@ -321,8 +321,16 @@ def compute_signals(df: pd.DataFrame, extras: dict) -> pd.DataFrame:
     if rsp_ser is not None:
         idx = pd.to_datetime(df['Date'])
         rsp_aligned = rsp_ser.reindex(idx).astype('float32')
-        ratio_return63 = (rsp_aligned / df['Price']).pct_change(63)
-        out['rsp_spy_63_neg'] = (ratio_return63 < 0).astype(float)
+        # Use .values for price to avoid index alignment issues during division
+        ratio_return63 = (rsp_aligned.values / df['Price'].values)
+        # Convert back to Series to use pct_change, or just use numpy
+        # Easier: keep ratio_return63 as Series with df index? No, rsp_aligned has Date index.
+        # Let's just use the aligned series and ignore index for the final assignment.
+        # But wait, we need to divide. rsp_aligned (Date index) / df['Price'] (Range index).
+        # We MUST use .values for the division to work row-wise.
+        ratio = pd.Series(rsp_aligned.values / df['Price'].values, index=df.index)
+        ratio_return63 = ratio.pct_change(63)
+        out['rsp_spy_63_neg'] = (ratio_return63 < 0).values.astype(float)
     else:
         out['rsp_spy_63_neg'] = np.nan
 
@@ -333,8 +341,9 @@ def compute_signals(df: pd.DataFrame, extras: dict) -> pd.DataFrame:
         idx = pd.to_datetime(df['Date'])
         hyg_a = hyg_ser.reindex(idx).astype('float32')
         lqd_a = lqd_ser.reindex(idx).astype('float32')
+        # Both have Date index, so division is fine. Result has Date index.
         credit_ratio21 = (hyg_a / lqd_a).pct_change(21)
-        out['hyg_lqd_21_neg'] = (credit_ratio21 < 0).astype(float)
+        out['hyg_lqd_21_neg'] = (credit_ratio21 < 0).values.astype(float)
     else:
         out['hyg_lqd_21_neg'] = np.nan
 
