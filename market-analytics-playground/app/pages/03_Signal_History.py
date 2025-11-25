@@ -391,9 +391,12 @@ with st.spinner('Loading SPY and extras...'):
         else:
             df_t = df_t.reset_index().sort_values('Date').reset_index(drop=True)
             price_col = None
-            for cand in ['Adj Close','Adj_Close','Close']:
-                if cand in df_t.columns:
-                    price_col = cand; break
+            price_col = None
+            # Flexible search for price column (handles MultiIndex flattening like 'Adj Close_RSP')
+            candidates = [c for c in df_t.columns 
+                          if ("adj close" in str(c).lower()) or (str(c).lower() == "close") or str(c).lower().endswith("_close")]
+            if candidates:
+                price_col = candidates[0]
             if price_col is None:
                 extras[t if t.startswith('^') else t] = pd.DataFrame()
             else:
