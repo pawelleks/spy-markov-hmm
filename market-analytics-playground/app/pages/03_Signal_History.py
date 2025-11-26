@@ -194,13 +194,17 @@ def compute_signals(df: pd.DataFrame, extras: dict) -> pd.DataFrame:
     """
     out = pd.DataFrame(index=df.index)
 
-    # helper: safely extract a price Series from extras for a given key
-    def _get_price_series(key):
-        s = extras.get(key)
-        if s is None or (isinstance(s, pd.DataFrame) and s.empty):
+    # helper to safely get the series from extras
+    def _get_price_series(k):
+        s = extras.get(k)
+        if s is None:
             return None
-        # If it's a DataFrame, prefer 'Price' or first numeric column; ensure datetime index
+        
+        # If it's a DataFrame (empty)
         if isinstance(s, pd.DataFrame):
+            if s.empty:
+                return None
+            # If it's a DataFrame, prefer 'Price' or first numeric column; ensure datetime index
             # try column names
             if 'Price' in s.columns:
                 ser = s['Price']
@@ -240,21 +244,26 @@ def compute_signals(df: pd.DataFrame, extras: dict) -> pd.DataFrame:
             if ser.empty:
                 return None
             return ser
-        return None
+            
         # If it's a Series
         if isinstance(s, pd.Series):
             ser = s.copy()
+            
             if not pd.api.types.is_datetime64_any_dtype(ser.index):
                 try:
                     ser.index = pd.to_datetime(ser.index, errors='coerce')
-                except Exception:
+                except Exception as e:
                     pass
+            
             ser = ser[~ser.index.isna()]
             # Normalize index to ensure alignment with df['Date']
             ser.index = pd.to_datetime(ser.index).normalize()
+            
             if ser.empty:
                 return None
+                
             return ser
+            
         return None
 
 
@@ -385,7 +394,7 @@ def compute_weighted_scores(signals_df: pd.DataFrame, weights_map: dict) -> (pd.
 
 # UI inputs
 st.sidebar.header('Signal History — Controls')
-st.sidebar.info("Deployment Version: v1.2 (Retry Logic Added)")
+st.sidebar.info("Deployment Version: v1.3 (Float Map Fix)")
 # date range default: last 5 years
 today = date.today()
 default_start = date(today.year-5, today.month, today.day)
@@ -478,14 +487,19 @@ st.markdown(f"Showing rows {start_idx+1}–{end_idx} of {n_rows}")
 
 # prepare display slice (newest first)
 display = table.iloc[start_idx:end_idx].copy()
-# format signals as check marks
+
 # format signals as check marks
 for col in signals.columns:
     if col == 'hmm_bear_prob':
         # Format as percentage for display
         display[col] = display[col].apply(lambda x: f"{x:.0%}" if pd.notnull(x) else 'NA')
     else:
-        display[col] = display[col].map({1: '✅', 0: '❌', np.nan: 'NA'})
+        # Handle both int and float 0/1, and NaNs
+        display[col] = display[col].map({
+            1: '✅', 1.0: '✅',
+            0: '❌', 0.0: '❌',
+            np.nan: 'NA'
+        })
 
 # color scale for score bands
 def score_color(val):
