@@ -414,15 +414,13 @@ with st.spinner('Loading SPY and extras...'):
             try:
                 df_t = yf.download(t, start=start, end=end, auto_adjust=False, progress=False)
                 if not df_t.empty:
-                    st.sidebar.success(f"DEBUG: Loaded {t} ({len(df_t)} rows) on attempt {attempt + 1}")
                     break
-            except Exception as e:
-                st.sidebar.warning(f"DEBUG: Failed to fetch {t} on attempt {attempt + 1}: {e}")
+            except Exception:
+                pass
             time.sleep(0.5) # Wait before retrying
         
         key = t if t.startswith('^') else t
         if df_t is None or df_t.empty:
-            st.sidebar.warning(f"DEBUG: Failed to fetch {t} after 3 attempts.")
             extras[key] = pd.DataFrame()
             continue # Skip to next ticker
     
@@ -440,7 +438,6 @@ with st.spinner('Loading SPY and extras...'):
             price_col = candidates[0]
         
         if price_col is None:
-            st.sidebar.warning(f"DEBUG: No price column found for {t}. Columns: {df_t.columns.tolist()}")
             extras[key] = pd.DataFrame()
             continue # Skip to next ticker
         
@@ -452,7 +449,6 @@ with st.spinner('Loading SPY and extras...'):
         ser.index = pd.to_datetime(ser.index).normalize()
         
         if ser.empty:
-            st.sidebar.warning(f"DEBUG: {t} Series empty after cleaning")
             extras[key] = pd.DataFrame() # Store empty DataFrame if series is empty
             continue # Skip to next ticker
             

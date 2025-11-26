@@ -5,11 +5,8 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="50d94d65-e749-4a1c-9be7-88e5f5b43d9c" name="Changes" comment="">
+      <change beforePath="$PROJECT_DIR$/.idea/market-analytics-playground.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/market-analytics-playground.iml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/market-analytics-playground/app/pages/02_Downtrend_Confirmation_Score.py" beforeDir="false" afterPath="$PROJECT_DIR$/market-analytics-playground/app/pages/02_Downtrend_Confirmation_Score.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/market-analytics-playground/requirements.txt" beforeDir="false" afterPath="$PROJECT_DIR$/market-analytics-playground/requirements.txt" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/requirements.txt" beforeDir="false" afterPath="$PROJECT_DIR$/requirements.txt" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/streamlit.log" beforeDir="false" afterPath="$PROJECT_DIR$/streamlit.log" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />

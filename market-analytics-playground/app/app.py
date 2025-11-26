@@ -98,6 +98,9 @@ with st.sidebar:
     st.markdown("---")
     st.header("HMM (optional)")
     use_hmm = st.checkbox("Enable HMM analysis", value=True)
+    
+    # DEBUG: Force session state population
+    st.session_state["hmm_bear_prob_series"] = [{"Date": pd.Timestamp("2023-01-01"), "Value": 0.5}]
     hmm_states = st.selectbox("# Hidden states", [2, 3], index=0)
     use_rv = st.checkbox("Include realized volatility (RV20)", value=True)
     hmm_years = st.slider("HMM train window (years)", 2, 25, 5, help="Fit on most-recent N years (saves memory).")
@@ -133,12 +136,23 @@ with st.sidebar:
 # Data loading
 # ----------------------------
 @st.cache_data(show_spinner=False, max_entries=2, ttl="2h")
-def load_spy(start, end):
+def load_spy(start, end, allow_empty=False):
     """Download SPY and compute daily returns."""
-    df = yf.download("SPY", start=start, end=end, auto_adjust=False, progress=False)
+    df = pd.DataFrame()
+    for attempt in range(3):
+        try:
+            df = yf.download("SPY", start=start, end=end, auto_adjust=False, progress=False)
+            if not df.empty:
+                break
+        except Exception:
+            pass
+        time.sleep(0.5)
+
     if df.empty:
-        st.error("No SPY data from yfinance.")
-        st.stop()
+        if not allow_empty:
+            st.error("No SPY data from yfinance.")
+            st.stop()
+        return pd.DataFrame()
 
     # Handle multi-level column names
     if isinstance(df.columns, pd.MultiIndex):
@@ -453,9 +467,8 @@ st.caption(
 # Import inside the block so the rest of the app still runs if HMM deps are missing
 try:
     from hmmlearn.hmm import GaussianHMM
-    from sklearn.preprocessing import StandardScaler
     HMM_OK = True
-except Exception:
+except Exception as e:
     HMM_OK = False
     if use_hmm:
         st.warning("HMM disabled: missing dependency (install `hmmlearn` and `scikit-learn`).")
@@ -477,15 +490,11 @@ if use_hmm and HMM_OK:
     X_cur   = scaler.transform(feats[X_cols].astype("float32").values)
 
     # ---------- Fit model & infer states on the CURRENT window ----------
-    try:
-        hmm = GaussianHMM(n_components=hmm_states, covariance_type="full", n_iter=400, random_state=42)
-        hmm.fit(X_train)
-        post_cur   = hmm.predict_proba(X_cur)        # T x K
-        states_idx = hmm.predict(X_cur)              # 0..K-1
-        trans      = hmm.transmat_.copy()            # K x K
-    except Exception as e:
-        st.error(f"HMM fitting failed: {e}")
-        post_cur = states_idx = trans = None
+    hmm = GaussianHMM(n_components=hmm_states, covariance_type="full", n_iter=400, random_state=42)
+    hmm.fit(X_train)
+    post_cur   = hmm.predict_proba(X_cur)        # T x K
+    states_idx = hmm.predict(X_cur)              # 0..K-1
+    trans      = hmm.transmat_.copy()            # K x K
 
     if post_cur is not None:
         # ---------- Human regime names (by mean return) ----------
@@ -528,6 +537,12 @@ if use_hmm and HMM_OK:
             post_cur_h.index = pd.to_datetime(feats["Date"]).reset_index(drop=True)
         except Exception:
             post_cur_h.index = pd.to_datetime(feats["Date"].astype(str)).reset_index(drop=True)
+
+        # Save current window Bear probability to session state immediately (as a fallback)
+        if "Bear" in post_cur_h.columns:
+            bear_series = post_cur_h["Bear"]
+            export_df = pd.DataFrame({"Date": bear_series.index, "Value": bear_series.values})
+            st.session_state["hmm_bear_prob_series"] = export_df.to_dict("records")
 
         # Most-recent regime probabilities (current window)
         last_probs = post_cur_h.iloc[-1]
@@ -577,7 +592,7 @@ if use_hmm and HMM_OK:
         @st.cache_data(show_spinner=False, ttl="6h")
         def _load_spy_full(_end):
             # Always fetch full history (from 1993) for the long-term view
-            return load_spy(date(1993, 1, 1), _end)
+            return load_spy(date(1993, 1, 1), _end, allow_empty=True)
 
         # Prefer a user-cached full-history (from sidebar action) to avoid re-downloading
         if st.session_state.get('spy_full') is not None:
@@ -596,65 +611,85 @@ if use_hmm and HMM_OK:
         except Exception:
             pass
 
-        feats_full = spy_full[["Date", "Price", "ret"]].copy()
-        if use_rv:
-            feats_full["rv20"] = feats_full["ret"].rolling(20).std().bfill()
-        feats_full = feats_full.dropna().reset_index(drop=True)
+        if spy_full.empty:
+            feats_full = pd.DataFrame()
+        else:
+            feats_full = spy_full[["Date", "Price", "ret"]].copy()
+            if use_rv:
+                feats_full["rv20"] = feats_full["ret"].rolling(20).std().bfill()
+            feats_full = feats_full.dropna().reset_index(drop=True)
 
-        X_full_hist = scaler.transform(feats_full[X_cols].astype("float32").values)
-        post_full   = hmm.predict_proba(X_full_hist)
-        post_full_h = pd.DataFrame(post_full[:, perm_old], columns=order_human)
-        # create a datetime index from feats_full dates so later .loc[date_cutoff:] works
         try:
-            feats_full_dates = pd.to_datetime(feats_full["Date"]).reset_index(drop=True)
-        except Exception:
-            feats_full_dates = pd.to_datetime(feats_full["Date"].astype(str)).reset_index(drop=True)
-        # keep feats_full as positional (reset) but index the posterior by the datetime values
-        feats_full = feats_full.reset_index(drop=True)
-        post_full_h.index = feats_full_dates
-        regime_full = post_full_h.idxmax(axis=1)
+            if feats_full.empty:
+                raise ValueError("Full history data missing")
+                
+            X_full_hist = scaler.transform(feats_full[X_cols].astype("float32").values)
+            post_full   = hmm.predict_proba(X_full_hist)
+            post_full_h = pd.DataFrame(post_full[:, perm_old], columns=order_human)
+            
+            # create a datetime index from feats_full dates so later .loc[date_cutoff:] works
+            try:
+                feats_full_dates = pd.to_datetime(feats_full["Date"]).reset_index(drop=True)
+            except Exception:
+                feats_full_dates = pd.to_datetime(feats_full["Date"].astype(str)).reset_index(drop=True)
+            # keep feats_full as positional (reset) but index the posterior by the datetime values
+            feats_full = feats_full.reset_index(drop=True)
+            post_full_h.index = feats_full_dates
+            regime_full = post_full_h.idxmax(axis=1)
 
-        # Save Bear probability to session state for other pages (e.g. Downtrend Score)
-        if "Bear" in post_full_h.columns:
-            # Create a lightweight list of dicts: [{'Date': ..., 'Value': ...}]
-            # This allows other pages to align by date even if their windows differ.
+            # Save Bear probability to session state for other pages (e.g. Downtrend Score)
+            if "Bear" in post_full_h.columns:
+                bear_series = post_full_h["Bear"]
+                export_df = pd.DataFrame({
+                    "Date": bear_series.index,
+                    "Value": bear_series.values
+                })
+                st.session_state["hmm_bear_prob_series"] = export_df.to_dict("records")
+            else:
+                pass # Removed st.sidebar.error
+
+        except Exception as e:
+            post_full_h = pd.DataFrame()
+            regime_full = pd.Series()
+
+        # Save Bear probability to session state (prefer full history, fallback to current)
+        saved_hmm = False
+        if not post_full_h.empty and "Bear" in post_full_h.columns:
             bear_series = post_full_h["Bear"]
-            # Ensure we have the dates as a column
-            export_df = pd.DataFrame({
-                "Date": bear_series.index,
-                "Value": bear_series.values
-            })
-            # Convert to records (list of dicts) to store in session_state
-            # We convert Date to string or keep as Timestamp? 
-            # The receiving page does: pd.to_datetime(hb_df["Date"]) so Timestamp is fine, or string.
-            # Let's use the native types (Timestamp) which pandas handles well.
+            export_df = pd.DataFrame({"Date": bear_series.index, "Value": bear_series.values})
             st.session_state["hmm_bear_prob_series"] = export_df.to_dict("records")
+            saved_hmm = True
+        
+        # Fallback: if full history failed but current window worked
+        if not saved_hmm and 'post_cur_h' in locals() and post_cur_h is not None and "Bear" in post_cur_h.columns:
+            # post_cur_h is indexed by integer, need to align with feats["Date"]
+            # feats is defined in the current window block
+            if 'feats' in locals() and len(feats) == len(post_cur_h):
+                bear_series = post_cur_h["Bear"]
+                export_df = pd.DataFrame({"Date": feats["Date"].values, "Value": bear_series.values})
+                st.session_state["hmm_bear_prob_series"] = export_df.to_dict("records")
 
         st.markdown("### SPY Price with HMM-Detected Regimes — Full History")
         fig, ax = styled_fig((11, 3.8))
-        ax.plot(feats_full["Date"], feats_full["Price"], color=LINE, linewidth=1.2)
-
-        s0 = 0
-        for i in range(1, len(regime_full)):
-            if regime_full.iloc[i] != regime_full.iloc[i-1]:
-                ax.axvspan(feats_full["Date"].iloc[s0], feats_full["Date"].iloc[i-1],
-                           color=color_map[regime_full.iloc[i-1]], alpha=0.12)
-                s0 = i
-        ax.axvspan(feats_full["Date"].iloc[s0], feats_full["Date"].iloc[-1],
-                   color=color_map[regime_full.iloc[-1]], alpha=0.12)
-
-        # Focus from ~1995 while keeping earlier data for context if present
-        try:
-            ax.set_xlim(pd.Timestamp("1995-01-01"), feats_full["Date"].iloc[-1])
-        except Exception:
-            pass
-
-        ax.set_xlabel("Date"); ax.set_ylabel("SPY Close")
-        ax.set_title("Long-Term Regimes (1995 → today)")
-        handles = [plt.Rectangle((0,0),1,1,color=color_map[n],alpha=0.4) for n in order_human]
-        leg = ax.legend(handles, order_human, fontsize=8, ncols=len(order_human))
-        leg.get_frame().set_facecolor(DARK_AX); leg.get_frame().set_edgecolor(GRID)
-        plt.tight_layout(); st.pyplot(fig); plt.close(fig)
+        if not feats_full.empty and not regime_full.empty:
+            ax.plot(feats_full["Date"], feats_full["Price"], color=LINE, linewidth=1.2)
+    
+            s0 = 0
+            for i in range(1, len(regime_full)):
+                if regime_full.iloc[i] != regime_full.iloc[i-1]:
+                    ax.axvspan(feats_full["Date"].iloc[s0], feats_full["Date"].iloc[i-1],
+                               color=color_map[regime_full.iloc[i-1]], alpha=0.12)
+                    s0 = i
+            ax.axvspan(feats_full["Date"].iloc[s0], feats_full["Date"].iloc[-1],
+                       color=color_map[regime_full.iloc[-1]], alpha=0.12)
+    
+            ax.set_xlabel("Date"); ax.set_ylabel("SPY Close"); ax.set_title("SPY Price with HMM-Detected Regimes (Full History)")
+            handles = [plt.Rectangle((0,0),1,1,color=color_map[n],alpha=0.4) for n in order_human]
+            leg = ax.legend(handles, order_human, fontsize=8, ncols=len(order_human))
+            leg.get_frame().set_facecolor(DARK_AX); leg.get_frame().set_edgecolor(GRID)
+            plt.tight_layout(); st.pyplot(fig); plt.close(fig)
+        else:
+            st.info("Full history chart not available (model failed or data missing).")
 
         st.caption(
             "Model **trained on last "

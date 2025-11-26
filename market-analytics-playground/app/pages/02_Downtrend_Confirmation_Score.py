@@ -357,7 +357,6 @@ else:
     credit_ratio21 = None
 
 # HMM Bear probability from session state
-# HMM Bear probability from session state
 hmm_bear = None
 hb_raw = st.session_state.get("hmm_bear_prob_series")
 if hb_raw is not None:
@@ -369,8 +368,8 @@ if hb_raw is not None:
             if {"Date", "Value"}.issubset(hb_df.columns):
                 hb_df["Date"] = pd.to_datetime(hb_df["Date"]).dt.normalize()
                 # Reindex to match the current page's dataframe dates
-                # Use ffill() to propagate the last known HMM state forward
-                tmp = hb_df.set_index("Date")["Value"].reindex(df["Date"]).ffill()
+                # Use ffill() to propagate the last known HMM state forward, and bfill() for initial gap
+                tmp = hb_df.set_index("Date")["Value"].reindex(df["Date"]).ffill().bfill()
                 hmm_bear = tmp.astype("float32")
     except Exception:
         pass
