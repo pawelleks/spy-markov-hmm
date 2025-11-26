@@ -385,7 +385,7 @@ def compute_weighted_scores(signals_df: pd.DataFrame, weights_map: dict) -> (pd.
 
 # UI inputs
 st.sidebar.header('Signal History — Controls')
-st.sidebar.info("Deployment Version: v1.1 (Index Fix Included)")
+st.sidebar.info("Deployment Version: v1.2 (Retry Logic Added)")
 # date range default: last 5 years
 today = date.today()
 default_start = date(today.year-5, today.month, today.day)
@@ -399,31 +399,55 @@ with st.spinner('Loading SPY and extras...'):
     # extras: VIX, VIX3M, RSP, HYG, LQD
     extras = {}
     for t in ['^VIX','^VIX3M','RSP','HYG','LQD']:
-        df_t = yf.download(t, start=start, end=end, auto_adjust=False, progress=False)
+        df_t = pd.DataFrame() # Initialize df_t before the loop
+        # Retry mechanism for data fetching
+        for attempt in range(3):
+            try:
+                df_t = yf.download(t, start=start, end=end, auto_adjust=False, progress=False)
+                if not df_t.empty:
+                    st.sidebar.success(f"DEBUG: Loaded {t} ({len(df_t)} rows) on attempt {attempt + 1}")
+                    break
+            except Exception as e:
+                st.sidebar.warning(f"DEBUG: Failed to fetch {t} on attempt {attempt + 1}: {e}")
+            time.sleep(0.5) # Wait before retrying
+        
+        key = t if t.startswith('^') else t
+        if df_t is None or df_t.empty:
+            st.sidebar.warning(f"DEBUG: Failed to fetch {t} after 3 attempts.")
+            extras[key] = pd.DataFrame()
+            continue # Skip to next ticker
+    
+        # Flatten MultiIndex if present
         if isinstance(df_t.columns, pd.MultiIndex):
             df_t.columns = ['_'.join([str(c) for c in col]).strip('_') for col in df_t.columns]
-        if df_t is None or df_t.empty:
-            extras[t if t.startswith('^') else t] = pd.DataFrame()
-        else:
-            df_t = df_t.reset_index().sort_values('Date').reset_index(drop=True)
-            price_col = None
-            price_col = None
-            # Flexible search for price column (handles MultiIndex flattening like 'Adj Close_RSP')
-            candidates = [c for c in df_t.columns 
-                          if ("adj close" in str(c).lower()) or (str(c).lower() == "close") or str(c).lower().endswith("_close")]
-            if candidates:
-                price_col = candidates[0]
-            if price_col is None:
-                extras[t if t.startswith('^') else t] = pd.DataFrame()
-            else:
-                df_t['Price'] = pd.to_numeric(df_t[price_col], errors='coerce').astype('float32')
-                key = t if t.startswith('^') else t
-                # create a Series with datetime index for simpler alignment
-                ser = pd.Series(df_t['Price'].values, index=pd.to_datetime(df_t['Date']), name='Price')
-                # drop NaNs
-                ser = ser[~ser.index.isna()].astype('float32')
-                extras[key] = ser
-
+    
+        df_t = df_t.reset_index().sort_values('Date').reset_index(drop=True)
+        
+        # Flexible price column search
+        price_col = None
+        candidates = [c for c in df_t.columns 
+                      if ("adj close" in str(c).lower()) or (str(c).lower() == "close") or str(c).lower().endswith("_close")]
+        if candidates:
+            price_col = candidates[0]
+        
+        if price_col is None:
+            st.sidebar.warning(f"DEBUG: No price column found for {t}. Columns: {df_t.columns.tolist()}")
+            extras[key] = pd.DataFrame()
+            continue # Skip to next ticker
+        
+        df_t['Price'] = pd.to_numeric(df_t[price_col], errors='coerce').astype('float32')
+        ser = pd.Series(df_t['Price'].values, index=pd.to_datetime(df_t['Date']), name='Price')
+        
+        # Clean and normalize index
+        ser = ser[~ser.index.isna()]
+        ser.index = pd.to_datetime(ser.index).normalize()
+        
+        if ser.empty:
+            st.sidebar.warning(f"DEBUG: {t} Series empty after cleaning")
+            extras[key] = pd.DataFrame() # Store empty DataFrame if series is empty
+            continue # Skip to next ticker
+            
+        extras[key] = ser
 
 
 if spy.empty:

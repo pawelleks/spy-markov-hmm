@@ -384,6 +384,10 @@ if hb_raw is not None:
         except Exception:
             hmm_bear = None
 
+if hmm_bear is None:
+    st.warning("HMM Bear Probability model not found in session state. Please visit the **Home** page to initialize the model.")
+
+
 # --- Signals (0/1 or NA) ---
 signals = pd.DataFrame(index=df.index)
 signals["price_lt_ema50"] = (spy_price < ema50).astype(float)
