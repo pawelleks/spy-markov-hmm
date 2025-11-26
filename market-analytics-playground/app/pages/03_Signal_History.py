@@ -385,6 +385,7 @@ def compute_weighted_scores(signals_df: pd.DataFrame, weights_map: dict) -> (pd.
 
 # UI inputs
 st.sidebar.header('Signal History — Controls')
+st.sidebar.info("Deployment Version: v1.1 (Index Fix Included)")
 # date range default: last 5 years
 today = date.today()
 default_start = date(today.year-5, today.month, today.day)
