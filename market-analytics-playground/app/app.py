@@ -467,6 +467,7 @@ st.caption(
 # Import inside the block so the rest of the app still runs if HMM deps are missing
 try:
     from hmmlearn.hmm import GaussianHMM
+    from sklearn.preprocessing import StandardScaler
     HMM_OK = True
 except Exception as e:
     HMM_OK = False
