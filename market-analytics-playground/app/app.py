@@ -103,7 +103,7 @@ with st.sidebar:
     st.session_state["hmm_bear_prob_series"] = [{"Date": pd.Timestamp("2023-01-01"), "Value": 0.5}]
     hmm_states = st.selectbox("# Hidden states", [2, 3], index=0)
     use_rv = st.checkbox("Include realized volatility (RV20)", value=True)
-    hmm_years = st.slider("HMM train window (years)", 2, 25, 5, help="Fit on most-recent N years (saves memory).")
+    hmm_years = st.select_slider("HMM train window (years)", options=[5, 10, 15, 20, 25], value=5, help="Fit on most-recent N years (saves memory).")
     bull_thresh = st.slider("Signal: Bull prob threshold", 0.5, 0.9, 0.6, 0.05)
     bear_thresh = st.slider("Signal: Bear prob threshold", 0.5, 0.9, 0.6, 0.05)
 
