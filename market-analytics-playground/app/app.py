@@ -11,6 +11,9 @@ import yfinance as yf
 import matplotlib.pyplot as plt
 from datetime import date
 from collections import defaultdict
+import time
+import json
+from pathlib import Path
 
 # ----------------------------
 # Dark theme helpers (TrendSpider-ish)
@@ -37,6 +40,120 @@ def styled_fig(size=(5, 3)):
     ax.title.set_color(FG)
     ax.grid(True, color=GRID, alpha=0.6, linewidth=0.8)
     return fig, ax
+
+
+def describe_hmm_run(
+    *,
+    ticker: str,
+    full_df: pd.DataFrame | None,
+    feats_train: pd.DataFrame,
+    feats_infer: pd.DataFrame,
+    stats_raw: pd.DataFrame,
+    trans_matrix: pd.DataFrame,
+    name_map: dict,
+    order_human: list[str],
+    bull_thresh: float,
+    bear_thresh: float,
+    scaler,
+    train_years: int,
+    feature_cols: list[str],
+    use_rv: bool,
+    hmm_states: int,
+    returns_formula: str = "ret_t = Price_t / Price_{t-1} - 1",
+    frequency: str = "Daily (trading days)",
+) -> dict:
+    """Return a JSON-serializable fingerprint describing the exact HMM pipeline run."""
+
+    def _date_bounds(df: pd.DataFrame | None):
+        if df is None or df.empty or "Date" not in df.columns:
+            return None, None
+        dates = pd.to_datetime(df["Date"])  # handles both datetime/date
+        return (
+            dates.min().strftime("%Y-%m-%d"),
+            dates.max().strftime("%Y-%m-%d"),
+        )
+
+    full_start, full_end = _date_bounds(full_df)
+    train_start, train_end = _date_bounds(feats_train)
+    infer_start, infer_end = _date_bounds(feats_infer)
+
+    stats_ordered = stats_raw.sort_index()
+    state_metrics = []
+    state_means = []
+    state_vols = []
+    for idx, row in stats_ordered.iterrows():
+        mean_daily = float(row.get("mean_daily", np.nan)) if pd.notna(row.get("mean_daily")) else None
+        std_daily = float(row.get("std_daily", np.nan)) if pd.notna(row.get("std_daily")) else None
+        state_metrics.append(
+            {
+                "state_id": int(idx),
+                "mean_daily": mean_daily,
+                "mean_annual": (mean_daily * 252.0) if mean_daily is not None else None,
+                "std_daily": std_daily,
+                "std_annual": (std_daily * np.sqrt(252.0)) if std_daily is not None else None,
+                "observations": int(row.get("count", 0)),
+            }
+        )
+        state_means.append(mean_daily)
+        state_vols.append(std_daily)
+
+    bull_state_id = next((int(i) for i, lbl in name_map.items() if lbl == "Bull"), None)
+    bear_state_id = next((int(i) for i, lbl in name_map.items() if lbl == "Bear"), None)
+
+    trans_payload = {
+        "order": order_human,
+        "matrix": trans_matrix.loc[order_human, order_human].to_numpy(dtype=float).tolist()
+        if trans_matrix is not None and not trans_matrix.empty else []
+    }
+
+    scaling_payload = {
+        "type": type(scaler).__name__ if scaler is not None else None,
+        "method": "StandardScaler (per-feature z-score)",
+        "fit_window_years": train_years,
+        "fit_period": {"start": train_start, "end": train_end},
+        "with_mean": bool(getattr(scaler, "with_mean", True)) if scaler is not None else None,
+        "with_std": bool(getattr(scaler, "with_std", True)) if scaler is not None else None,
+    }
+
+    payload = {
+        "ticker": ticker,
+        "data_start": full_start,
+        "data_end": full_end,
+        "train_start": train_start,
+        "train_end": train_end,
+        "inference_start": infer_start,
+        "inference_end": infer_end,
+        "n_samples_full": int(len(full_df)) if full_df is not None else 0,
+        "n_samples_train": int(len(feats_train)),
+        "n_samples_inference": int(len(feats_infer)),
+        "returns_type": returns_formula,
+        "frequency": frequency,
+        "features_used": feature_cols,
+        "uses_realized_volatility": bool(use_rv),
+        "scaling": scaling_payload,
+        "hmm_n_states": int(hmm_states),
+        "state_means": state_means,
+        "state_vols": state_vols,
+        "state_metrics": state_metrics,
+        "state_mapping": {str(k): v for k, v in name_map.items()},
+        "human_state_order": order_human,
+        "transition_matrix": trans_payload,
+        "bull_state_id": bull_state_id,
+        "bear_state_id": bear_state_id,
+        "state_mapping_rule": "States ranked by mean daily return: lowest→Bear, highest→Bull, middle→Neutral.",
+        "probability_thresholds": {
+            "bull": float(bull_thresh),
+            "bear": float(bear_thresh),
+        },
+        "signal_logic": {
+            "long_neutral": "Long when P(Bull) > bull_threshold, cash otherwise.",
+            "long_short": "Long when P(Bull) > bull_threshold; short when P(Bear) > bear_threshold; neutral otherwise.",
+        },
+        "smoothing": "None",
+        "lookahead_handling": "Posterior probabilities use same-day features and multiply same day's returns (no future leakage).",
+        "data_source": "Yahoo Finance via yfinance",
+    }
+    return payload
 
 # ----------------------------
 # Streamlit Page setup
@@ -99,8 +216,7 @@ with st.sidebar:
     st.header("HMM (optional)")
     use_hmm = st.checkbox("Enable HMM analysis", value=True)
     
-    # DEBUG: Force session state population
-    st.session_state["hmm_bear_prob_series"] = [{"Date": pd.Timestamp("2023-01-01"), "Value": 0.5}]
+
     hmm_states = st.selectbox("# Hidden states", [2, 3], index=0)
     use_rv = st.checkbox("Include realized volatility (RV20)", value=True)
     hmm_years = st.select_slider("HMM train window (years)", options=[5, 10, 15, 20, 25], value=5, help="Fit on most-recent N years (saves memory).")
@@ -669,6 +785,36 @@ if use_hmm and HMM_OK:
                 bear_series = post_cur_h["Bear"]
                 export_df = pd.DataFrame({"Date": feats["Date"].values, "Value": bear_series.values})
                 st.session_state["hmm_bear_prob_series"] = export_df.to_dict("records")
+
+        # ---------- Debug fingerprint dump ----------
+        try:
+            debug_payload = describe_hmm_run(
+                ticker="SPY",
+                full_df=spy_full if 'spy_full' in locals() else feats_full,
+                feats_train=feats_train,
+                feats_infer=feats,
+                stats_raw=stats_raw,
+                trans_matrix=trans_h,
+                name_map=name_map,
+                order_human=order_human,
+                bull_thresh=bull_thresh,
+                bear_thresh=bear_thresh,
+                scaler=scaler,
+                train_years=hmm_years,
+                feature_cols=X_cols,
+                use_rv=use_rv,
+                hmm_states=hmm_states,
+            )
+            window_slug = f"{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}"
+            debug_filename = (
+                f"hmm_debug_SPY_{window_slug}_{hmm_states}st_"
+                f"{int(round(bull_thresh * 100))}pct_{int(round(bear_thresh * 100))}pct.json"
+            )
+            debug_path = Path(__file__).resolve().parent / debug_filename
+            debug_path.write_text(json.dumps(debug_payload, indent=2))
+            st.caption(f"HMM debug fingerprint saved → `{debug_path.name}`")
+        except Exception as debug_err:
+            st.warning(f"HMM debug fingerprint unavailable: {debug_err}")
 
         st.markdown("### SPY Price with HMM-Detected Regimes — Full History")
         fig, ax = styled_fig((11, 3.8))
